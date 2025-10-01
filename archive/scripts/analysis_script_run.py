@@ -1,21 +1,9 @@
 #mount + import data
-from itertools import chain
-import math
-import random
 import pandas as pd
-from pathlib import Path
 import numpy as np
 from bertopic import BERTopic #ML analysis of qualitative reviews
-from tqdm import tqdm 
-import sys
-import os
 from collections import defaultdict #dictionary package
 
-from itertools import chain
-from typing import List, Tuple, Optional
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.cluster import KMeans
-from hdbscan import HDBSCAN
 #report assembly:
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -24,33 +12,9 @@ from collections import Counter
 ################## USER INPUT HERE ##########################
 #input name of excel file
 data_name = "08252025_gars.xlsx"
-output_pdf_name = "08302025_results.pdf"
 df = pd.read_excel(data_name) #importing data 
-bootstrap_quant = 1000
-process_data = True
-bootstrap = True
-run_analysis = True
 
-#######################################################
 ################# CODE################################
-
-#processing data 
-if process_data:
-     #turn column into numbers
-     # --- Insert Name column before index 4 (between Email and f_name/l_name) ---
-    if "First Name" in df.columns and "Last Name" in df.columns:
-        df.insert(4, "Name", (df["First Name"].fillna("").astype(str) + " " + df["Last Name"].fillna("").astype(str)).str.strip())
-    else:
-        df.insert(4, "Name", "")
-
-    # --- Ensure num_patients (col index 8) is integer, else 0 ---
-    col_patients = "Number of Patients Visited (e.g., 10)"
-    if col_patients in df.columns:
-        df["num_patients"] = pd.to_numeric(df[col_patients], errors="coerce")
-        df["num_patients"] = df["num_patients"].where(df["num_patients"] % 1 == 0, 0)
-        df["num_patients"] = df["num_patients"].fillna(0).astype(int)
-
-
 #common items asked: -- list is just for references - update if original column headers get changed
 form_dict = {
     0: "Id",
@@ -127,58 +91,6 @@ df.columns = [processed_form_dict[i] for i in range(len(df.columns))] #changing 
 """
 Make dictionaries with department separated reviews.
 """
-
-def _concat_theme_dict(theme_map: dict) -> pd.DataFrame:
-    frames = []
-    for dept, df in theme_map.items():
-        if df is None or getattr(df, "empty", False):
-            continue
-        dfc = df.copy()
-        if "department" not in dfc.columns:
-            dfc.insert(0, "department", dept)
-        else:
-            dfc["department"] = dept
-        frames.append(dfc)
-    if not frames:
-        return pd.DataFrame(columns=["department"]) # empty-safe
-    return pd.concat(frames, ignore_index=True)
-def as_flat_str_list(docs):
-    flat = []
-    for d in docs:
-        if isinstance(d, list):            # flatten nested lists
-            flat.extend(d)
-        else:
-            flat.append(d)
-    cleaned = []
-    for d in flat:
-        if d is None:
-            continue
-        if isinstance(d, float) and (math.isnan(d) or math.isinf(d)):
-            continue
-        s = str(d).strip()
-        if s:  # keep non-empty
-            cleaned.append(s)
-    return cleaned
-
-
-def cycle_fill(texts, target):
-    """
-    Uniformly repeat items in `texts` until length == target.
-    If target < len(texts), just truncate.
-    """
-    if not texts or target <= 0:
-        return []
-    n = len(texts)
-    out = []
-    while len(out) < target:
-        need = target - len(out)
-        # if need >= n, take whole list
-        if need >= n:
-            out.extend(texts)
-        else:
-            out.extend(texts[:need])
-    return out
-
 # 1) Build a mapping from the *original* long headers to your cleaned names
 col_map = {
     form_dict[i]: processed_form_dict[i]
@@ -229,8 +141,7 @@ monthly_data = defaultdict(lambda: {
     "wait":    defaultdict(nested_dict),
 })
 # now in your loop, grab the month and write into monthly_data[...] as well:
-for department, indices in tqdm(department_ind_dict.items(), desc="Processing departments" ):
-    tqdm.write(f"Now processing: {department}")
+for department, indices in department_ind_dict.items():
     pos_reviews = []
     neg_reviews = []
     for idx in indices:
@@ -264,81 +175,31 @@ for department, indices in tqdm(department_ind_dict.items(), desc="Processing de
             monthly_data[month]["wait"][department][col_name][resp] += num_patients
 
         # ─── POS / NEG REVIEWS (change if more items get added) ───────────────────────────────────────────
-        pos_text = row.iloc[25]
-        neg_text = row.iloc[26]
-        if pd.notnull(pos_text) and str(pos_text).strip():
-            pos_reviews.append(str(pos_text).strip())
-        if pd.notnull(neg_text) and str(neg_text).strip():
-            neg_reviews.append(str(neg_text).strip())
+        # pos_text = row.iloc[25]
+        # neg_text = row.iloc[26]
+        # if pd.notnull(pos_text) and str(pos_text).strip():
+        #     pos_reviews.append(str(pos_text).strip())
+        # if pd.notnull(neg_text) and str(neg_text).strip():
+        #     neg_reviews.append(str(neg_text).strip())
 
     # (you can still run BERTopic here if you like, 
     #  and store monthly themes analogously in monthly_data[month])
 
-    # At the end, `monthly_data` is populated by month:
-    # e.g. monthly_data["2025-04"]["service"]["Cardiology"]["Blankets"]["2"] == how many “2 blankets” responses in April for Cardiology.
+# At the end, `monthly_data` is populated by month:
+# e.g. monthly_data["2025-04"]["service"]["Cardiology"]["Blankets"]["2"] == how many “2 blankets” responses in April for Cardiology.
 
         # --------- Run BERTopic on Positive Reviews ---------
-    if run_analysis:
-        pos_boot_add, neg_boot_add = [], []
+    #in the same loop as department 
+    # if pos_reviews:
+    #     pos_model = BERTopic()
+    #     pos_model.fit(pos_reviews)
+    #     pos_rev_themes[department] = pos_model.get_topic_info()
 
-        if bootstrap:
-            if pos_reviews:
-                pos_boot = cycle_fill(pos_reviews, bootstrap_quant)
-                pos_boot_add = pos_reviews + pos_boot  # include originals + uniform additions
-            if neg_reviews:
-                neg_boot = cycle_fill(neg_reviews, bootstrap_quant)
-                neg_boot_add = neg_reviews + neg_boot
-        else:
-            pos_boot_add = list(pos_reviews)
-            neg_boot_add = list(neg_reviews)
-
-        pos_boot_add = as_flat_str_list(pos_boot_add)
-        neg_boot_add = as_flat_str_list(neg_boot_add)
-        
-        vectorizer = CountVectorizer(
-            ngram_range=(2, 3),        # allow bi+trigrams
-            min_df=1,                  # keep rare phrases
-            stop_words=None,           # don’t drop stopwords (helps form phrases)
-            token_pattern=r"(?u)\b\w+\b"  # keep 1-char tokens if present
-        )
-        if pos_reviews:
-            try:
-                pos_model = BERTopic(vectorizer_model=vectorizer)
-                pos_model.fit(pos_boot_add)
-                pos_rev_themes[department] = pos_model.get_topic_info()
-
-            except Exception as e:
-                print(f"[{department}] POS review BERTopic failed: {e}")
-                pos_rev_themes[department] = None  # or {} if you want a dict
-
-        if neg_reviews:
-            try:
-                neg_model = BERTopic(vectorizer_model=vectorizer)
-                neg_model.fit(neg_boot_add)
-                neg_rev_themes[department] = neg_model.get_topic_info()
-
-            except Exception as e:
-                print(f"[{department}] NEG review BERTopic failed: {e}")
-                neg_rev_themes[department] = None
-
-
-
-############## export ################
-        out_dir = Path(".") # change if needed
-        pos_df = _concat_theme_dict(pos_rev_themes)
-        neg_df = _concat_theme_dict(neg_rev_themes)
-
-
-        pos_df.to_csv(out_dir / "pos_rev_themes.csv", index=False)
-        neg_df.to_csv(out_dir / "neg_rev_themes.csv", index=False)
-
-
-        print(f"Saved pos_rev_themes.csv with {len(pos_df)} rows")
-        print(f"Saved neg_rev_themes.csv with {len(neg_df)} rows")
-
-        
-
-   
+    # # --------- Run BERTopic on Negative Reviews ---------
+    # if neg_reviews:
+    #     neg_model = BERTopic()
+    #     neg_model.fit(neg_reviews)
+    #     neg_rev_themes[department] = neg_model.get_topic_info()
     ### BE SURE TO SCALE THEMES BY # Patients visited – VERY APPLICABLE AND IMPORTANT FOR THIS ANALYSIS
 
 ##############################################################################################################################
@@ -397,7 +258,7 @@ df['date'] = pd.to_datetime(df['date'])
 months = sorted(monthly_data.keys())
 recent_month = months[-1]
 
-with PdfPages(output_pdf_name) as pdf:
+with PdfPages("monthly_report.pdf") as pdf:
     for dept in department_ind_dict:
 
         # ─── top row: clustered–bar charts for most recent month ─────────
@@ -425,35 +286,24 @@ with PdfPages(output_pdf_name) as pdf:
 
         # ─── bottom-left: service trend as “most-freq bin” lines ──────
         # build global category list for this dept’s service bins
-        # --- bottom-left: service trend with small vertical offsets -------------------
-        delta = .05  # small, visible nudge
-        # incremental offsets: 0, +δ, +2δ, ...
-        svc_questions = list(dep_service[dept].keys())
-        svc_offsets = {q: i * delta for i, q in enumerate(svc_questions)}
-
-        # (optional) symmetric around 0 to reduce upward bias:
-        # svc_offsets = {q: (i - (len(svc_questions)-1)/2) * delta for i, q in enumerate(svc_questions)}
-
-        # build global category list for this dept’s service bins
         svc_bins = sorted({
-            b
+            b 
             for m in months
             for qdict in monthly_data[m]["service"].get(dept, {}).values()
             for b in qdict
         })
-        svc_map = {b: i for i, b in enumerate(svc_bins)}
+        svc_map = {b:i for i,b in enumerate(svc_bins)}
 
-        for question in svc_questions:
+        for question in dep_service[dept].keys():
             y = []
             for m in months:
                 qdict = monthly_data[m]["service"].get(dept, {}).get(question, {})
                 if qdict:
                     # pick one of the bins with max count
                     max_count = max(qdict.values())
-                    top_bins = [b for b, c in qdict.items() if c == max_count]
+                    top_bins = [b for b,c in qdict.items() if c==max_count]
                     chosen = sorted(top_bins)[0]
-                    # add tiny per-series offset so overlapping lines separate
-                    y.append(svc_map[chosen] + svc_offsets[question])  # why: visual separation only
+                    y.append(svc_map[chosen])
                 else:
                     y.append(np.nan)
             ax3.plot(months, y, marker="o", label=question)
@@ -464,34 +314,26 @@ with PdfPages(output_pdf_name) as pdf:
         ax3.set_xticklabels(months, rotation=45, ha="right")
         ax3.set_ylabel("Service requests per shift")
         ax3.set_title("Monthly Service Request Trends")
-        ax3.legend(title="Question", bbox_to_anchor=(1.02, 1), loc="upper left")
+        ax3.legend(title="Question", bbox_to_anchor=(1.02,1), loc="upper left")
 
-        # ensure highest-offset series isn't clipped
-        svc_max_off = max(svc_offsets.values(), default=0.0)
-        ax3.set_ylim(-0.5, (len(svc_bins) - 1) + svc_max_off + 0.5)
-
-        # --- bottom-right: wait trend with small vertical offsets ---------------------
-        wt_questions = list(dep_wait[dept].keys())
-        wt_offsets = {q: i * delta for i, q in enumerate(wt_questions)}
-        # wt_offsets = {q: (i - (len(wt_questions)-1)/2) * delta for i, q in enumerate(wt_questions)}  # symmetric option
-
+        # ─── bottom-right: wait trend as “most-freq bin” lines ─────────
         wt_bins = sorted({
-            b
+            b 
             for m in months
             for qdict in monthly_data[m]["wait"].get(dept, {}).values()
             for b in qdict
         })
-        wt_map = {b: i for i, b in enumerate(wt_bins)}
+        wt_map = {b:i for i,b in enumerate(wt_bins)}
 
-        for question in wt_questions:
+        for question in dep_wait[dept].keys():
             y = []
             for m in months:
                 qdict = monthly_data[m]["wait"].get(dept, {}).get(question, {})
                 if qdict:
                     max_count = max(qdict.values())
-                    top_bins = [b for b, c in qdict.items() if c == max_count]
+                    top_bins = [b for b,c in qdict.items() if c==max_count]
                     chosen = sorted(top_bins)[0]
-                    y.append(wt_map[chosen] + wt_offsets[question])  # why: visual separation only
+                    y.append(wt_map[chosen])
                 else:
                     y.append(np.nan)
             ax4.plot(months, y, marker="o", label=question)
@@ -502,13 +344,10 @@ with PdfPages(output_pdf_name) as pdf:
         ax4.set_xticklabels(months, rotation=45, ha="right")
         ax4.set_ylabel("Avg. % of patients waiting per shift")
         ax4.set_title("Monthly Patient Wait Time Trends")
-        ax4.legend(title="Question", bbox_to_anchor=(1.02, 1), loc="upper left")
+        ax4.legend(title="Question", bbox_to_anchor=(1.02,1), loc="upper left")
 
-        wt_max_off = max(wt_offsets.values(), default=0.0)
-        ax4.set_ylim(-0.5, (len(wt_bins) - 1) + wt_max_off + 0.5)
-
-        # --- finalize and save page ---------------------------------------------------
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        # ─── finalize and save page ────────────────────────────────────
+        plt.tight_layout(rect=[0,0,1,0.95])
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 

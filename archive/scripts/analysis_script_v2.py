@@ -24,33 +24,13 @@ from collections import Counter
 ################## USER INPUT HERE ##########################
 #input name of excel file
 data_name = "08252025_gars.xlsx"
-output_pdf_name = "08302025_results.pdf"
+output_pdf_name = "08252025_analysis_results.pdf"
 df = pd.read_excel(data_name) #importing data 
 bootstrap_quant = 1000
-process_data = True
 bootstrap = True
 run_analysis = True
 
-#######################################################
 ################# CODE################################
-
-#processing data 
-if process_data:
-     #turn column into numbers
-     # --- Insert Name column before index 4 (between Email and f_name/l_name) ---
-    if "First Name" in df.columns and "Last Name" in df.columns:
-        df.insert(4, "Name", (df["First Name"].fillna("").astype(str) + " " + df["Last Name"].fillna("").astype(str)).str.strip())
-    else:
-        df.insert(4, "Name", "")
-
-    # --- Ensure num_patients (col index 8) is integer, else 0 ---
-    col_patients = "Number of Patients Visited (e.g., 10)"
-    if col_patients in df.columns:
-        df["num_patients"] = pd.to_numeric(df[col_patients], errors="coerce")
-        df["num_patients"] = df["num_patients"].where(df["num_patients"] % 1 == 0, 0)
-        df["num_patients"] = df["num_patients"].fillna(0).astype(int)
-
-
 #common items asked: -- list is just for references - update if original column headers get changed
 form_dict = {
     0: "Id",
@@ -160,24 +140,70 @@ def as_flat_str_list(docs):
             cleaned.append(s)
     return cleaned
 
-
-def cycle_fill(texts, target):
-    """
-    Uniformly repeat items in `texts` until length == target.
-    If target < len(texts), just truncate.
-    """
-    if not texts or target <= 0:
-        return []
-    n = len(texts)
-    out = []
-    while len(out) < target:
-        need = target - len(out)
-        # if need >= n, take whole list
-        if need >= n:
-            out.extend(texts)
+def _flatten_clean_str_list(docs) -> List[str]:
+    flat = []
+    for d in docs:
+        if isinstance(d, list):
+            flat.extend(d)
         else:
-            out.extend(texts[:need])
-    return out
+            flat.append(d)
+    cleaned = []
+    for d in flat:
+        if d is None:
+            continue
+        if isinstance(d, float) and (math.isnan(d) or math.isinf(d)):
+            continue
+        s = str(d).strip()
+        if s:
+            cleaned.append(s)
+    return cleaned
+
+def safe_fit_bertopic(docs):
+    docs = as_flat_str_list(docs)
+    if len(docs) < 2:
+        return None, None, "not_enough_docs"
+
+    # permissive word vectorizer → fallback to char if needed
+    vec = CountVectorizer(min_df=1, token_pattern=r'(?u)\b\w+\b')
+    X = vec.fit_transform(docs)
+    if X.shape[1] < 2:
+        vec = CountVectorizer(analyzer="char", ngram_range=(3,5), min_df=1)
+        X = vec.fit_transform(docs)
+        if X.shape[1] < 2:
+            return None, None, "not_enough_features"
+
+    # external clustering to force ≥2 labels
+    if X.shape[0] < 2:
+        return None, None, "not_enough_docs"
+    kmeans = KMeans(n_clusters=2, n_init="auto", random_state=42)
+    labels = kmeans.fit_predict(X)
+
+    # >>> IMPORTANT: give BERTopic an HDBSCAN with valid min_cluster_size
+    hdb = HDBSCAN(min_cluster_size=2, min_samples=1)  # avoids ValueError
+
+    topic_model = BERTopic(
+        vectorizer_model=vec,
+        hdbscan_model=hdb,                 # <-- key change
+        min_topic_size=1,                  # allow tiny topics; we enforced 2 labels already
+        calculate_probabilities=False,
+        verbose=False
+    )
+
+    # Use semi-supervised mode: y=labels
+    topic_model.fit(docs, y=labels)
+    info = topic_model.get_topic_info()
+
+    # ensure at least 2 topics survived
+    try:
+        n_topics = len(info) if hasattr(info, "__len__") else (info.shape[0] if hasattr(info, "shape") else 0)
+    except Exception:
+        n_topics = 0
+    if n_topics < 2:
+        return None, None, "not_enough_topics"
+
+    return topic_model, info, "ok"
+
+
 
 # 1) Build a mapping from the *original* long headers to your cleaned names
 col_map = {
@@ -279,44 +305,42 @@ for department, indices in tqdm(department_ind_dict.items(), desc="Processing de
 
         # --------- Run BERTopic on Positive Reviews ---------
     if run_analysis:
-        pos_boot_add, neg_boot_add = [], []
-
+        pos_boot_add = []
+        neg_boot_add = []
         if bootstrap:
+            #in the same loop as department 
+            rng = random.Random(123)
             if pos_reviews:
-                pos_boot = cycle_fill(pos_reviews, bootstrap_quant)
-                pos_boot_add = pos_reviews + pos_boot  # include originals + uniform additions
+                pos_boot = rng.choices(pos_reviews, k= bootstrap_quant)
             if neg_reviews:
-                neg_boot = cycle_fill(neg_reviews, bootstrap_quant)
-                neg_boot_add = neg_reviews + neg_boot
+                neg_boot = rng.choices(neg_reviews, k= bootstrap_quant)
+            
+            # pos_boot_add = [str(x) for x in pos_reviews] + [str(x) for x in pos_boot]
+            # neg_boot_add = [str(x) for x in neg_reviews] + [str(x) for x in neg_boot]
+            pos_boot_add = pos_boot
+            neg_boot_add = neg_boot
         else:
-            pos_boot_add = list(pos_reviews)
-            neg_boot_add = list(neg_reviews)
+            pos_boot_add = pos_reviews
+            neg_boot_add = neg_reviews
 
         pos_boot_add = as_flat_str_list(pos_boot_add)
         neg_boot_add = as_flat_str_list(neg_boot_add)
         
-        vectorizer = CountVectorizer(
-            ngram_range=(2, 3),        # allow bi+trigrams
-            min_df=1,                  # keep rare phrases
-            stop_words=None,           # don’t drop stopwords (helps form phrases)
-            token_pattern=r"(?u)\b\w+\b"  # keep 1-char tokens if present
-        )
+        
         if pos_reviews:
             try:
-                pos_model = BERTopic(vectorizer_model=vectorizer)
+                pos_model = BERTopic()
                 pos_model.fit(pos_boot_add)
                 pos_rev_themes[department] = pos_model.get_topic_info()
-
             except Exception as e:
                 print(f"[{department}] POS review BERTopic failed: {e}")
                 pos_rev_themes[department] = None  # or {} if you want a dict
 
         if neg_reviews:
             try:
-                neg_model = BERTopic(vectorizer_model=vectorizer)
+                neg_model = BERTopic()
                 neg_model.fit(neg_boot_add)
                 neg_rev_themes[department] = neg_model.get_topic_info()
-
             except Exception as e:
                 print(f"[{department}] NEG review BERTopic failed: {e}")
                 neg_rev_themes[department] = None
