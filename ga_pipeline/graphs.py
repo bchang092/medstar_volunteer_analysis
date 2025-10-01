@@ -1,5 +1,5 @@
 # ga_pipeline/graphs.py
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -8,9 +8,6 @@ plt.rcParams["axes.facecolor"]   = "white"
 plt.rcParams["axes.prop_cycle"]  = plt.cycler("color", plt.cm.tab10.colors)
 
 def plot_clustered_bars(ax, data: dict, title: str, legend_str: str):
-    """
-    data: { question_label: { response_label: frequency, … }, … }
-    """
     if not data or all(len(d) == 0 for d in data.values()):
         ax.text(0.5, 0.5, "No data to plot",
                 ha="center", va="center", fontsize=12)
@@ -35,12 +32,18 @@ def plot_clustered_bars(ax, data: dict, title: str, legend_str: str):
     ax.set_title(title)
     ax.legend(title=legend_str, bbox_to_anchor=(1.02, 1), loc="upper left")
 
-def page_for_department(pdf, dept: str,
-                        months: List[str],
-                        monthly_data: Dict[str, Any],
-                        dep_service: Dict[str, Any],
-                        dep_wait: Dict[str, Any]):
-
+def page_for_department(
+    pdf,
+    dept: str,
+    months: List[str],
+    monthly_data: Dict[str, Any],
+    dep_service: Dict[str, Any],
+    dep_wait: Dict[str, Any],
+    *,
+    date_start: Optional[str] = None,
+    date_end: Optional[str] = None,
+):
+    """Render the 2x2 page for a single department. date_start/end are optional and only used for header text."""
     recent = months[-1] if months else None
     svc_recent = monthly_data.get(recent, {}).get("service", {}).get(dept, {}) if recent else {}
     wt_recent  = monthly_data.get(recent, {}).get("wait", {}).get(dept, {}) if recent else {}
@@ -48,12 +51,27 @@ def page_for_department(pdf, dept: str,
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
     ax1, ax2, ax3, ax4 = axs.flatten()
 
-    header = f"Monthly Report for {recent}: {dept}" if recent else f"Department: {dept}"
-    fig.text(0.5, 0.99, header, ha="center", va="top",
-             fontsize=20, fontweight="bold",
-             bbox=dict(boxstyle="round,pad=0.3", facecolor="skyblue", alpha=0.5))
+    # Header text shows the filter window if provided
+    window_str = ""
+    if date_start or date_end:
+        s = date_start or "…"
+        e = date_end or "…"
+        window_str = f"  |  Window: {s} → {e}"
 
-    # Top row: bar charts
+    title_core = f"{dept}"
+    if recent:
+        header = f"Monthly Report for {recent}{window_str}: {title_core}"
+    else:
+        header = f"Monthly Report{window_str}: {title_core}"
+
+    fig.text(
+        0.5, 0.99, header,
+        ha="center", va="top",
+        fontsize=20, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="skyblue", alpha=0.5)
+    )
+
+    # Top row
     plot_clustered_bars(ax1, svc_recent, "Most Commonly Requested Services", "Requests per shift")
     plot_clustered_bars(ax2, wt_recent, "Wait Time Report", "% of patients waiting (per shift)")
 
@@ -69,6 +87,8 @@ def page_for_department(pdf, dept: str,
     })
     svc_map = {b: i for i, b in enumerate(svc_bins)}
 
+    # use integer x positions for consistent ticks
+    x_positions = np.arange(len(months))
     for question in svc_questions:
         y = []
         for m in months:
@@ -80,11 +100,11 @@ def page_for_department(pdf, dept: str,
                 y.append(svc_map[chosen] + svc_offsets[question])
             else:
                 y.append(np.nan)
-        ax3.plot(months, y, marker="o", label=question)
+        ax3.plot(x_positions, y, marker="o", label=question)
 
     ax3.set_yticks(range(len(svc_bins)))
     ax3.set_yticklabels(svc_bins)
-    ax3.set_xticks(range(len(months)))
+    ax3.set_xticks(x_positions)
     ax3.set_xticklabels(months, rotation=45, ha="right")
     ax3.set_ylabel("Service request bin")
     ax3.set_title("Monthly Service Request Trends")
@@ -102,6 +122,7 @@ def page_for_department(pdf, dept: str,
     })
     wt_map = {b: i for i, b in enumerate(wt_bins)}
 
+    y_positions = np.arange(len(months))
     for question in wt_questions:
         y = []
         for m in months:
@@ -113,11 +134,11 @@ def page_for_department(pdf, dept: str,
                 y.append(wt_map[chosen] + wt_offsets[question])
             else:
                 y.append(np.nan)
-        ax4.plot(months, y, marker="o", label=question)
+        ax4.plot(y_positions, y, marker="o", label=question)
 
     ax4.set_yticks(range(len(wt_bins)))
     ax4.set_yticklabels(wt_bins)
-    ax4.set_xticks(range(len(months)))
+    ax4.set_xticks(y_positions)
     ax4.set_xticklabels(months, rotation=45, ha="right")
     ax4.set_ylabel("Wait time bin")
     ax4.set_title("Monthly Patient Wait Time Trends")

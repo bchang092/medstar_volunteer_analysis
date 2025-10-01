@@ -14,11 +14,14 @@ def build_pdf(
     months: List[str],
     pos_theme_df=None,
     neg_theme_df=None,
+    date_start=None, 
+    date_end=None
 ):
     with PdfPages(output_pdf_path) as pdf:
         # one page per department with the 2x2 dashboard
         for dept in department_ind_dict.keys():
-            page_for_department(pdf, dept, months, monthly_data, dep_service, dep_wait)
+            page_for_department(pdf, dept, months, monthly_data, dep_service, dep_wait,
+                                date_start=date_start, date_end=date_end)
 
         # (Optional) add simple top-themes pages if available
         if pos_theme_df is not None and not pos_theme_df.empty:

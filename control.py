@@ -10,6 +10,9 @@ BUILD_GRAPHS   = True         # graphs are generated inside the PDF
 ASSEMBLE_PDF   = True
 excel_name = "Guest Ambassador Rounding Survey.xlsx"
 OUTPUT_PDF_NAME  = "09302025_results.pdf"        # final report name
+DATE_START = None   # or None
+DATE_END   = "2025-09-30"   # or None
+
 
 # ----------------------------
 # Inputs / Outputs
@@ -31,7 +34,11 @@ def main():
 
     if PROCESS_DATA:
         print("[1/4] Processing data...")
-        df, artifacts = processing.run_processing(DATA_PATH)
+        df, artifacts = processing.run_processing(
+            excel_path=DATA_PATH,
+            date_start=DATE_START,
+            date_end=DATE_END,
+        )
         # artifacts keys:
         # 'department_ind_dict', 'monthly_data', 'dep_service', 'dep_wait',
         # 'pos_texts_by_dept', 'neg_texts_by_dept', 'months'
@@ -63,6 +70,8 @@ def main():
             # optional qualitative dfs; report can ignore if None
             pos_theme_df=pos_theme_df,
             neg_theme_df=neg_theme_df,
+            date_start=DATE_START,
+            date_end=DATE_END,
         )
 
     print("[4/4] Done!")
