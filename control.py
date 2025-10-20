@@ -5,12 +5,12 @@ from ga_pipeline import processing, qualitative, report
 # User-configurable switches
 # ----------------------------
 PROCESS_DATA   = True
-RUN_QUAL       = False
+RUN_QUAL       = True
 BUILD_GRAPHS   = True         # graphs are generated inside the PDF
 ASSEMBLE_PDF   = True
 excel_name = "Guest Ambassador Rounding Survey.xlsx"
-OUTPUT_PDF_NAME  = "09302025_results.pdf"        # final report name
-DATE_START = None   # or None
+OUTPUT_PDF_NAME  = "09302025_results_qual.pdf"        # final report name
+DATE_START = "2025-06-30"   # or None
 DATE_END   = "2025-09-30"   # or None
 
 
@@ -20,8 +20,8 @@ DATE_END   = "2025-09-30"   # or None
 DATA_PATH        = Path("data") / excel_name
 OUTPUT_DIR       = Path("outputs")
 # OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-BOOTSTRAP        = True
-BOOTSTRAP_QUANT  = 1000
+BOOTSTRAP        = False
+BOOTSTRAP_QUANT  = 0
 
 
 ########################################################################
@@ -55,6 +55,16 @@ def main():
             bootstrap=BOOTSTRAP,
             bootstrap_quant=BOOTSTRAP_QUANT,
             output_dir=OUTPUT_DIR,
+            date_start=DATE_START,
+            date_end=DATE_END,
+            min_docs=5,               # run only if >= 5 reviews
+            ngram_range=(1, 2),
+            max_features=6000,
+            min_df=2,
+            max_df=1.0,
+            k_max=8,
+            n_top_terms=8,
+            random_state=42,
         )
         # qual contains 'pos_themes_by_dept', 'neg_themes_by_dept'
 
