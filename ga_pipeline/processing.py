@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-
 # ----------------------------
 # Column header maps (original → processed)
 # ----------------------------
@@ -54,7 +53,7 @@ PROCESSED_DICT = {
     5: "f_name",
     6: "l_name",
     7: "date",
-    8: "num_patients",          # original numeric-ish column name
+    8: "num_patients",
     9: "floor",
     10: "num_patient_portal",
     11: "Blankets",
@@ -80,7 +79,6 @@ PROCESSED_DICT = {
 # Small helpers
 # ----------------------------
 def _nested_dict():
-    """level-2 defaultdict[int] pattern: q -> response -> int count"""
     return defaultdict(lambda: defaultdict(int))
 
 def _as_month_key(ts) -> str:
@@ -97,12 +95,6 @@ def _parse_date_or_none(x: Optional[str]):
         return None
 
 def extract_first_int(val) -> int:
-    """
-    Robustly coerce a cell to int:
-    - numeric → int(val)
-    - string with numbers → first number (e.g., '20 (both wings)' -> 20, '10–12 patients' -> 10)
-    - otherwise → 0
-    """
     if pd.isna(val):
         return 0
     if isinstance(val, (int, float)) and not isinstance(val, bool):
@@ -125,41 +117,28 @@ def _insert_full_name(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _fix_num_patients_column(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create a clean integer column 'num_patients_clean'.
-    Prefer the survey column 'Number of Patients Visited (e.g., 10)' if present,
-    else fall back to 'num_patients' if present.
-    """
-    # try canonical survey header
     survey_col_candidates: List[str] = [c for c in df.columns if "Number of Patients Visited" in str(c)]
     src_col = survey_col_candidates[0] if survey_col_candidates else None
-
     if src_col is None and "num_patients" in df.columns:
         src_col = "num_patients"
 
     if src_col is not None:
         df["num_patients_clean"] = df[src_col].apply(extract_first_int)
     else:
-        # If truly nothing to use, create zeros so downstream code stays happy.
         df["num_patients_clean"] = 0
-
     return df
 
 def _rename_headers(df: pd.DataFrame) -> pd.DataFrame:
-    # If the file has the same number/order of columns, set by ordinal:
     if len(df.columns) >= len(PROCESSED_DICT):
         try:
             df.columns = [PROCESSED_DICT.get(i, df.columns[i]) for i in range(len(df.columns))]
         except Exception:
-            # fall back to name-based mapping below if shapes mismatch
             pass
 
-    # Name-based mapping from any FORM_DICT names still present to PROCESSED_DICT
     name_map = {FORM_DICT[i]: PROCESSED_DICT[i] for i in FORM_DICT if FORM_DICT[i] in df.columns}
     if name_map:
         df = df.rename(columns=name_map)
 
-    # Normalize some expected keys if they still carry original names
     if "Shift Date" in df.columns and "date" not in df.columns:
         df = df.rename(columns={"Shift Date": "date"})
     if "Shift Floor" in df.columns and "floor" not in df.columns:
@@ -171,10 +150,8 @@ def _build_department_index(df: pd.DataFrame) -> Dict[str, list]:
     dept_idx: Dict[str, list] = {}
     floor_col = "floor" if "floor" in df.columns else ("Shift Floor" if "Shift Floor" in df.columns else None)
     if floor_col is None:
-        # No department info; single bucket
         dept_idx["(unknown department)"] = list(range(len(df)))
         return dept_idx
-
     for i in range(len(df)):
         dept = df.iloc[i][floor_col]
         dept_idx.setdefault(dept, []).append(i)
@@ -190,37 +167,24 @@ def run_processing(
     date_end: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
-    Load the survey Excel, normalize headers, build 'num_patients_clean',
-    optionally filter by an inclusive [date_start, date_end] window,
-    and aggregate per-department monthly service/wait dictionaries and review texts.
-
-    Returns:
-        df (pd.DataFrame): cleaned dataframe (includes 'num_patients_clean', 'date')
-        artifacts (dict): {
-            'department_ind_dict', 'monthly_data', 'dep_service', 'dep_wait',
-            'pos_texts_by_dept', 'neg_texts_by_dept', 'months'
-        }
+    Load, clean, filter, and aggregate monthly data + qualitative text.
+    Also computes per-month, per-department average patients_per_shift
+    (used by graphs.py instead of constant 8.0 fallback).
     """
     log = logging.getLogger("processing")
     log.info(f"Loading Excel: {excel_path}")
 
     df = pd.read_excel(excel_path)
-
-    # Basic canonicalization
     df = _insert_full_name(df)
     df = _rename_headers(df)
 
-    # Ensure date is datetime
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
     else:
-        # Create empty date col if missing (prevents downstream KeyErrors)
         df["date"] = pd.NaT
 
-    # Clean num_patients
     df = _fix_num_patients_column(df)
 
-    # ---- Date window filter (inclusive) ----
     start_ts = _parse_date_or_none(date_start)
     end_ts   = _parse_date_or_none(date_end)
 
@@ -229,14 +193,13 @@ def run_processing(
         if start_ts is not None:
             mask &= (df["date"] >= start_ts)
         if end_ts is not None:
-            mask &= (df["date"] <= end_ts)  # inclusive end
+            mask &= (df["date"] <= end_ts)
         before = len(df)
         df = df[mask].copy()
         log.info(f"Date filter applied: start={start_ts}, end={end_ts} → kept {len(df)}/{before} rows")
 
-    # If nothing left after filtering, return empty artifacts
     if df.empty:
-        log.warning("No rows to process after filtering. Returning empty artifacts.")
+        log.warning("No rows to process after filtering.")
         return df, {
             "department_ind_dict": {},
             "monthly_data": {},
@@ -247,33 +210,42 @@ def run_processing(
             "months": [],
         }
 
-    # Build department index
     department_ind_dict = _build_department_index(df)
     depts = list(department_ind_dict.keys())
     log.info(f"Found {len(depts)} departments.")
 
-    # Aggregation stores
-    dep_service: Dict[str, Any] = defaultdict(_nested_dict)  # dept -> question -> response -> count
-    dep_wait: Dict[str, Any]    = defaultdict(_nested_dict)  # dept -> question -> response -> sum(num_patients_clean)
+    dep_service: Dict[str, Any] = defaultdict(_nested_dict)
+    dep_wait: Dict[str, Any]    = defaultdict(_nested_dict)
+
+    # ✅ Add patients_per_shift key for graphs.py
     monthly_data: Dict[str, Any] = defaultdict(
-        lambda: {"service": defaultdict(_nested_dict), "wait": defaultdict(_nested_dict)}
+        lambda: {
+            "service": defaultdict(_nested_dict),
+            "wait": defaultdict(_nested_dict),
+            "patients_per_shift": defaultdict(float),
+        }
     )
 
     pos_texts_by_dept: Dict[str, List[str]] = defaultdict(list)
     neg_texts_by_dept: Dict[str, List[str]] = defaultdict(list)
 
-    # Main aggregation loop
+    # Track total patients & submissions per month/department
+    pps_total = defaultdict(lambda: defaultdict(float))
+    pps_count = defaultdict(lambda: defaultdict(int))
+
+    # -------- Aggregation --------
     for dept in tqdm(depts, desc="Processing departments", unit="dept"):
         indices = department_ind_dict[dept]
         for idx in indices:
             row = df.iloc[idx]
             month = _as_month_key(row.get("date"))
 
-            # patients visited (prefer cleaned)
-            num_patients = row.get("num_patients_clean", row.get("num_patients", 0))
-            num_patients = extract_first_int(num_patients)
+            num_patients = extract_first_int(row.get("num_patients_clean", 0))
+            # Tally patients/submissions
+            pps_total[month][dept] += float(num_patients)
+            pps_count[month][dept] += 1
 
-            # --- Services (cols 11..19 in PROCESSED_DICT) ---
+            # --- Services (cols 11–19)
             for col in range(11, 20):
                 col_name = PROCESSED_DICT[col]
                 if col_name in df.columns:
@@ -283,7 +255,7 @@ def run_processing(
                         dep_service[dept][col_name][resp] += 1
                         monthly_data[month]["service"][dept][col_name][resp] += 1
 
-            # --- Wait times (cols 20..24) accumulate affected patients ---
+            # --- Wait times (cols 20–24)
             for col in range(20, 25):
                 col_name = PROCESSED_DICT[col]
                 if col_name in df.columns:
@@ -298,6 +270,13 @@ def run_processing(
                 pos_texts_by_dept[dept].append(str(pos_text).strip())
             if pd.notnull(neg_text) and str(neg_text).strip():
                 neg_texts_by_dept[dept].append(str(neg_text).strip())
+
+    # Compute per-month, per-dept average patients_per_shift
+    for month in monthly_data.keys():
+        for dept in department_ind_dict.keys():
+            cnt = pps_count[month][dept]
+            if cnt > 0:
+                monthly_data[month]["patients_per_shift"][dept] = pps_total[month][dept] / float(cnt)
 
     months = sorted(monthly_data.keys())
     log.info(f"Aggregated {len(months)} month buckets.")
