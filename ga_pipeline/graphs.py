@@ -1,37 +1,206 @@
 # ga_pipeline/graphs.py
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import re
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import cm
 
-plt.rcParams["figure.facecolor"] = "whitesmoke"
-plt.rcParams["axes.facecolor"]   = "white"
-plt.rcParams["axes.prop_cycle"]  = plt.cycler("color", plt.cm.tab10.colors)
+# ----------- Visual defaults -----------
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor":   "white",
+    "axes.prop_cycle":  plt.cycler("color", [cm.Blues(i) for i in np.linspace(0.35, 0.95, 6)]),
+    "axes.grid": True,
+    "grid.alpha": 0.25,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.titlesize": 12,
+    "axes.labelsize": 10,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "figure.dpi": 140,
+})
 
-def plot_clustered_bars(ax, data: dict, title: str, legend_str: str):
-    if not data or all(len(d) == 0 for d in data.values()):
-        ax.text(0.5, 0.5, "No data to plot",
-                ha="center", va="center", fontsize=12)
-        ax.set_axis_off()
-        return
+# ----------- Normalization knobs for heatmaps -----------
+NORMALIZE_HEATMAPS = True
+RATE_PER_SUBMISSIONS = 10.0  # patients per N submissions in heatmaps
 
-    questions = list(data.keys())
-    responses = sorted({r for q in questions for r in data[q]})
-    n_q, n_r = len(questions), len(responses)
+# ----------- Constants / heuristics -----------
+AVG_PATIENTS_PER_SUBMISSION = 8.0
 
-    width = 0.8 / max(n_r, 1)
-    x = np.arange(n_q)
+SERVICE_BIN_PATIENTS_MAP = {
+    "0": 0, "0 patients": 0, "0 patient": 0,
+    "1 to 3 patients": 2, "1-3 patients": 2, "1–3 patients": 2, "1 – 3 patients": 2,
+    "4 to 6 patients": 5, "4-6 patients": 5, "4–6 patients": 5, "4 – 6 patients": 5,
+    "6+ patients": 9, "6 + patients": 9, "6 plus patients": 9, "6 or more patients": 9,
+}
 
-    for i, resp in enumerate(responses):
-        freqs = [data[q].get(resp, 0) for q in questions]
-        positions = x + i * width
-        ax.bar(positions, freqs, width, label=resp)
+WAIT_BAND_MIDPOINT = {
+    "0-25%": 0.125, "0 – 25%": 0.125, "0 –25%": 0.125, "0 – 25 %": 0.125,
+    "25-50%": 0.375, "25 – 50%": 0.375, "25–50%": 0.375,
+    "50-75%": 0.625, "50 – 75%": 0.625, "50–75%": 0.625,
+    "75-100%": 0.875, "75 – 100%": 0.875, "75–100%": 0.875,
+}
 
-    ax.set_xticks(x + width * (len(responses) - 1) / 2)
-    ax.set_xticklabels(questions, rotation=45, ha="right")
-    ax.set_ylabel("Frequency")
+# ----------- Utilities -----------
+def _norm_key(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+def _service_bin_patients(label: str) -> Optional[int]:
+    key = _norm_key(label)
+    if key in SERVICE_BIN_PATIENTS_MAP:
+        return SERVICE_BIN_PATIENTS_MAP[key]
+    m = re.match(r"^(\d+)\s*[-–]\s*(\d+)\s*patients?$", key)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        return int(round((lo + hi) / 2.0))
+    if key.startswith("6"):
+        return 9
+    if key == "0":
+        return 0
+    return None
+
+def _wait_band_midpoint(label: str) -> Optional[float]:
+    key = _norm_key(label)
+    if key in WAIT_BAND_MIDPOINT:
+        return WAIT_BAND_MIDPOINT[key]
+    m = re.match(r"^(\d+)\s*[-–]\s*(\d+)\s*%$", key)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        return ((lo + hi) / 2.0) / 100.0
+    return None
+
+def _sum_counts(d: Dict[str, int]) -> int:
+    return int(sum(d.values())) if d else 0
+
+def _patients_per_submission(monthly_data: Dict[str, Any], month: str, dept: str) -> float:
+    try:
+        return float(monthly_data.get(month, {}).get("patients_per_shift", {}).get(dept, AVG_PATIENTS_PER_SUBMISSION))
+    except Exception:
+        return AVG_PATIENTS_PER_SUBMISSION
+
+def _total_service_submissions(monthly_data: Dict[str, Any], month: str, dept: str) -> float:
+    svc = monthly_data.get(month, {}).get("service", {}).get(dept, {}) or {}
+    return float(sum(_sum_counts(qdict) for qdict in svc.values()))
+
+def _total_wait_submissions(monthly_data: Dict[str, Any], month: str, dept: str) -> float:
+    wt = monthly_data.get(month, {}).get("wait", {}).get(dept, {}) or {}
+    return float(sum(_sum_counts(qdict) for qdict in wt.values()))
+
+def _blues(n: int) -> List:
+    return [cm.Blues(x) for x in np.linspace(0.35, 0.95, max(n, 1))]
+
+# ----------- Top-left: Services snapshot (stacked, horizontal; submissions) -----------
+def _plot_services_stacked_submissions(ax, svc_recent: Dict[str, Dict[str, int]]):
+    if not svc_recent:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center"); ax.set_axis_off(); return
+
+    questions = list(svc_recent.keys())
+    bins = list({b for q in questions for b in svc_recent[q].keys()})
+    order_hint = ["0", "0 Patients", "1 to 3 Patients", "1-3 Patients", "4 to 6 Patients", "4-6 Patients", "6+ Patients"]
+    bins_sorted = [b for b in order_hint if b in bins] + [b for b in bins if b not in order_hint]
+    colors = _blues(len(bins_sorted))
+
+    y = np.arange(len(questions))
+    left = np.zeros(len(questions), dtype=float)
+    for color, b in zip(colors, bins_sorted):
+        vals = np.array([float(svc_recent.get(q, {}).get(b, 0)) for q in questions], dtype=float)
+        ax.barh(y, vals, left=left, label=b, color=color, edgecolor="white", linewidth=0.5)
+        left += vals
+
+    ax.set_yticks(y); ax.set_yticklabels(questions)
+    ax.set_xlabel("Number of Volunteer Submissions")
+    ax.set_title("Most Commonly Requested Services")
+    # Legend OUTSIDE (right)
+    ax.legend(title="Requests per shift", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+
+# ----------- Top-right: Wait snapshot (stacked, horizontal; submissions) -----------
+def _plot_wait_stacked_submissions(ax, wt_recent: Dict[str, Dict[str, int]]):
+    if not wt_recent:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center"); ax.set_axis_off(); return
+
+    questions = list(wt_recent.keys())
+    bands = list({b for q in questions for b in wt_recent[q].keys()})
+    band_order = ["0-25%", "25-50%", "50-75%", "75-100%"]
+    bands_sorted = [b for b in band_order if b in bands] + [b for b in bands if b not in band_order]
+    colors = _blues(len(bands_sorted))
+
+    y = np.arange(len(questions))
+    left = np.zeros(len(questions), dtype=float)
+    for color, b in zip(colors, bands_sorted):
+        vals = np.array([float(wt_recent.get(q, {}).get(b, 0)) for q in questions], dtype=float)
+        ax.barh(y, vals, left=left, label=b, color=color, edgecolor="white", linewidth=0.5)
+        left += vals
+
+    ax.set_yticks(y); ax.set_yticklabels(questions)
+    ax.set_xlabel("Number of Volunteer submissions")
+    ax.set_title("Wait Time Report")
+    ax.legend(title="Wait band", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+
+# ----------- Bottom-left: Services heatmap -----------
+def _compute_service_patients_monthly(months: List[str], monthly_data: Dict[str, Any], dept: str) -> Tuple[List[str], np.ndarray]:
+    questions = sorted({q for m in months for q in monthly_data.get(m, {}).get("service", {}).get(dept, {}).keys()})
+    if not questions:
+        return [], np.zeros((0, len(months)), dtype=float)
+
+    mat = np.zeros((len(questions), len(months)), dtype=float)
+    for j, m in enumerate(months):
+        svc = monthly_data.get(m, {}).get("service", {}).get(dept, {}) or {}
+        den = _total_service_submissions(monthly_data, m, dept) if NORMALIZE_HEATMAPS else 1.0
+        scale = (RATE_PER_SUBMISSIONS / den) if (NORMALIZE_HEATMAPS and den > 0) else 1.0
+        for i, q in enumerate(questions):
+            qdict = svc.get(q, {}) or {}
+            pat = 0.0
+            for b, c in qdict.items():
+                w = _service_bin_patients(b)
+                if w is not None:
+                    pat += float(c) * float(w)
+            mat[i, j] = pat * scale
+    return questions, mat
+
+def _plot_service_heatmap(ax, months: List[str], questions: List[str], mat: np.ndarray, title: str):
+    if mat.size == 0:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center"); ax.set_axis_off(); return
+    im = ax.imshow(mat, aspect="auto", cmap="Blues")
+    ax.set_xticks(np.arange(len(months))); ax.set_xticklabels(months, rotation=45, ha="right")
+    ax.set_yticks(np.arange(len(questions))); ax.set_yticklabels(questions)
     ax.set_title(title)
-    ax.legend(title=legend_str, bbox_to_anchor=(1.02, 1), loc="upper left")
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(f"# patients (per {int(RATE_PER_SUBMISSIONS)} submissions)" if NORMALIZE_HEATMAPS else "# patients (estimated)")
 
+# ----------- Bottom-right: Wait heatmap -----------
+def _compute_wait_patients_monthly(months: List[str], monthly_data: Dict[str, Any], dept: str) -> Tuple[List[str], np.ndarray]:
+    questions = sorted({q for m in months for q in monthly_data.get(m, {}).get("wait", {}).get(dept, {}).keys()})
+    if not questions:
+        return [], np.zeros((0, len(months)), dtype=float)
+
+    mat = np.zeros((len(questions), len(months)), dtype=float)
+    for j, m in enumerate(months):
+        wt = monthly_data.get(m, {}).get("wait", {}).get(dept, {}) or {}
+        pps = _patients_per_submission(monthly_data, m, dept)
+        den = _total_wait_submissions(monthly_data, m, dept) if NORMALIZE_HEATMAPS else 1.0
+        scale = (RATE_PER_SUBMISSIONS / den) if (NORMALIZE_HEATMAPS and den > 0) else 1.0
+        for i, q in enumerate(questions):
+            qdict = wt.get(q, {}) or {}
+            pat = 0.0
+            for band, count in qdict.items():
+                mid = _wait_band_midpoint(band)
+                if mid is not None:
+                    pat += float(count) * mid * pps
+            mat[i, j] = pat * scale
+    return questions, mat
+
+def _plot_wait_heatmap(ax, months: List[str], questions: List[str], mat: np.ndarray, title: str):
+    if mat.size == 0:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center"); ax.set_axis_off(); return
+    im = ax.imshow(mat, aspect="auto", cmap="Blues")
+    ax.set_xticks(np.arange(len(months))); ax.set_xticklabels(months, rotation=45, ha="right")
+    ax.set_yticks(np.arange(len(questions))); ax.set_yticklabels(questions)
+    ax.set_title(title)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(f"# patients waiting (per {int(RATE_PER_SUBMISSIONS)} submissions)" if NORMALIZE_HEATMAPS else "# patients waiting (estimated)")
+
+# ----------- Page assembly (NO Matplotlib header; extra right margin for legends) -----------
 def page_for_department(
     pdf,
     dept: str,
@@ -43,108 +212,24 @@ def page_for_department(
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
 ):
-    """Render the 2x2 page for a single department. date_start/end are optional and only used for header text."""
+    """Render the 2×2 page for a single department (no banner text here)."""
     recent = months[-1] if months else None
     svc_recent = monthly_data.get(recent, {}).get("service", {}).get(dept, {}) if recent else {}
     wt_recent  = monthly_data.get(recent, {}).get("wait", {}).get(dept, {}) if recent else {}
 
-    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axs = plt.subplots(2, 2, figsize=(13.2, 9.2))
     ax1, ax2, ax3, ax4 = axs.flatten()
 
-    # Header text shows the filter window if provided
-    window_str = ""
-    if date_start or date_end:
-        s = date_start or "…"
-        e = date_end or "…"
-        window_str = f"  |  Window: {s} → {e}"
+    _plot_services_stacked_submissions(ax1, svc_recent)
+    _plot_wait_stacked_submissions(ax2, wt_recent)
 
-    title_core = f"{dept}"
-    if recent:
-        header = f"Monthly Report for {recent}{window_str}: {title_core}"
-    else:
-        header = f"Monthly Report{window_str}: {title_core}"
+    svc_questions, svc_mat = _compute_service_patients_monthly(months, monthly_data, dept)
+    _plot_service_heatmap(ax3, months, svc_questions, svc_mat, title="Monthly Service Request Trends (# patients)")
 
-    fig.text(
-        0.5, 0.99, header,
-        ha="center", va="top",
-        fontsize=20, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="skyblue", alpha=0.5)
-    )
+    wt_questions, wt_mat = _compute_wait_patients_monthly(months, monthly_data, dept)
+    _plot_wait_heatmap(ax4, months, wt_questions, wt_mat, title="Monthly Patient Wait Time Trends (# patients)")
 
-    # Top row
-    plot_clustered_bars(ax1, svc_recent, "Most Commonly Requested Services", "Requests per shift")
-    plot_clustered_bars(ax2, wt_recent, "Wait Time Report", "% of patients waiting (per shift)")
-
-    # Bottom-left: service trend (most frequent bin per question)
-    delta = 0.05
-    svc_questions = list(dep_service.get(dept, {}).keys())
-    svc_offsets = {q: i * delta for i, q in enumerate(svc_questions)}
-    svc_bins = sorted({
-        b
-        for m in months
-        for qdict in monthly_data.get(m, {}).get("service", {}).get(dept, {}).values()
-        for b in qdict
-    })
-    svc_map = {b: i for i, b in enumerate(svc_bins)}
-
-    # use integer x positions for consistent ticks
-    x_positions = np.arange(len(months))
-    for question in svc_questions:
-        y = []
-        for m in months:
-            qdict = monthly_data.get(m, {}).get("service", {}).get(dept, {}).get(question, {})
-            if qdict:
-                max_count = max(qdict.values())
-                top_bins = [b for b, c in qdict.items() if c == max_count]
-                chosen = sorted(top_bins)[0]
-                y.append(svc_map[chosen] + svc_offsets[question])
-            else:
-                y.append(np.nan)
-        ax3.plot(x_positions, y, marker="o", label=question)
-
-    ax3.set_yticks(range(len(svc_bins)))
-    ax3.set_yticklabels(svc_bins)
-    ax3.set_xticks(x_positions)
-    ax3.set_xticklabels(months, rotation=45, ha="right")
-    ax3.set_ylabel("Service request bin")
-    ax3.set_title("Monthly Service Request Trends")
-    ax3.legend(title="Question", bbox_to_anchor=(1.02, 1), loc="upper left")
-    ax3.set_ylim(-0.5, (len(svc_bins) - 1) + max(svc_offsets.values(), default=0.0) + 0.5)
-
-    # Bottom-right: wait trend (most frequent bin per question)
-    wt_questions = list(dep_wait.get(dept, {}).keys())
-    wt_offsets = {q: i * delta for i, q in enumerate(wt_questions)}
-    wt_bins = sorted({
-        b
-        for m in months
-        for qdict in monthly_data.get(m, {}).get("wait", {}).get(dept, {}).values()
-        for b in qdict
-    })
-    wt_map = {b: i for i, b in enumerate(wt_bins)}
-
-    y_positions = np.arange(len(months))
-    for question in wt_questions:
-        y = []
-        for m in months:
-            qdict = monthly_data.get(m, {}).get("wait", {}).get(dept, {}).get(question, {})
-            if qdict:
-                max_count = max(qdict.values())
-                top_bins = [b for b, c in qdict.items() if c == max_count]
-                chosen = sorted(top_bins)[0]
-                y.append(wt_map[chosen] + wt_offsets[question])
-            else:
-                y.append(np.nan)
-        ax4.plot(y_positions, y, marker="o", label=question)
-
-    ax4.set_yticks(range(len(wt_bins)))
-    ax4.set_yticklabels(wt_bins)
-    ax4.set_xticks(y_positions)
-    ax4.set_xticklabels(months, rotation=45, ha="right")
-    ax4.set_ylabel("Wait time bin")
-    ax4.set_title("Monthly Patient Wait Time Trends")
-    ax4.legend(title="Question", bbox_to_anchor=(1.02, 1), loc="upper left")
-    ax4.set_ylim(-0.5, (len(wt_bins) - 1) + max(wt_offsets.values(), default=0.0) + 0.5)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    # Leave a right margin (~15%) for legends outside axes
+    plt.tight_layout(rect=[0, 0, 0.85, 0.98])
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
