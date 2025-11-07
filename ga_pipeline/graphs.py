@@ -1,4 +1,3 @@
-# ga_pipeline/graphs.py
 from typing import Dict, Any, List, Optional, Tuple
 import re
 import numpy as np
@@ -36,10 +35,7 @@ SERVICE_BIN_PATIENTS_MAP = {
 }
 
 WAIT_BAND_MIDPOINT = {
-    "0-25%": 0.125, "0 – 25%": 0.125, "0 –25%": 0.125, "0 – 25 %": 0.125,
-    "25-50%": 0.375, "25 – 50%": 0.375, "25–50%": 0.375,
-    "50-75%": 0.625, "50 – 75%": 0.625, "50–75%": 0.625,
-    "75-100%": 0.875, "75 – 100%": 0.875, "75–100%": 0.875,
+    "0-25%": 0.125, "25-50%": 0.375, "50-75%": 0.625, "75-100%": 0.875,
 }
 
 # ----------- Utilities -----------
@@ -111,7 +107,6 @@ def _plot_services_stacked_submissions(ax, svc_recent: Dict[str, Dict[str, int]]
     ax.set_yticks(y); ax.set_yticklabels(questions)
     ax.set_xlabel("Number of Volunteer Submissions")
     ax.set_title("Most Commonly Requested Services")
-    # Legend OUTSIDE (right)
     ax.legend(title="Requests per shift", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
 # ----------- Top-right: Wait snapshot (stacked, horizontal; submissions) -----------
@@ -200,7 +195,7 @@ def _plot_wait_heatmap(ax, months: List[str], questions: List[str], mat: np.ndar
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(f"# patients waiting (per {int(RATE_PER_SUBMISSIONS)} submissions)" if NORMALIZE_HEATMAPS else "# patients waiting (estimated)")
 
-# ----------- Page assembly (NO Matplotlib header; extra right margin for legends) -----------
+# ----------- Page assembly: emit FOUR separate figures (wider & shorter) -----------
 def page_for_department(
     pdf,
     dept: str,
@@ -212,24 +207,50 @@ def page_for_department(
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
 ):
-    """Render the 2×2 page for a single department (no banner text here)."""
+    """
+    Render four independent figures (NOT a single 2×2 figure):
+      1) Services snapshot (stacked bars)
+      2) Wait snapshot
+      3) Services heatmap
+      4) Wait heatmap
+
+    Slightly shorter to help single-page layout.
+    """
     recent = months[-1] if months else None
     svc_recent = monthly_data.get(recent, {}).get("service", {}).get(dept, {}) if recent else {}
     wt_recent  = monthly_data.get(recent, {}).get("wait", {}).get(dept, {}) if recent else {}
 
-    fig, axs = plt.subplots(2, 2, figsize=(13.2, 9.2))
-    ax1, ax2, ax3, ax4 = axs.flatten()
+    # Wider & shorter figures (width, height inches)
+    FIGSIZE = (6.8, 2.9)  # ↓ shorter than before
 
+    # ---- 1) Services snapshot
+    fig1, ax1 = plt.subplots(figsize=FIGSIZE)
     _plot_services_stacked_submissions(ax1, svc_recent)
+    plt.tight_layout(rect=[0, 0, 0.84, 1.0])
+    pdf.savefig(fig1, bbox_inches="tight")
+    plt.close(fig1)
+
+    # ---- 2) Wait snapshot
+    fig2, ax2 = plt.subplots(figsize=FIGSIZE)
     _plot_wait_stacked_submissions(ax2, wt_recent)
+    plt.tight_layout(rect=[0, 0, 0.84, 1.0])
+    pdf.savefig(fig2, bbox_inches="tight")
+    plt.close(fig2)
 
+    # ---- 3) Services heatmap (monthly)
     svc_questions, svc_mat = _compute_service_patients_monthly(months, monthly_data, dept)
-    _plot_service_heatmap(ax3, months, svc_questions, svc_mat, title="Monthly Service Request Trends (# patients)")
+    fig3, ax3 = plt.subplots(figsize=FIGSIZE)
+    _plot_service_heatmap(ax3, months, svc_questions, svc_mat,
+                          title="Monthly Service Request Trends (# patients)")
+    plt.tight_layout()
+    pdf.savefig(fig3, bbox_inches="tight")
+    plt.close(fig3)
 
+    # ---- 4) Wait heatmap (monthly)
     wt_questions, wt_mat = _compute_wait_patients_monthly(months, monthly_data, dept)
-    _plot_wait_heatmap(ax4, months, wt_questions, wt_mat, title="Monthly Patient Wait Time Trends (# patients)")
-
-    # Leave a right margin (~15%) for legends outside axes
-    plt.tight_layout(rect=[0, 0, 0.85, 0.98])
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
+    fig4, ax4 = plt.subplots(figsize=FIGSIZE)
+    _plot_wait_heatmap(ax4, months, wt_questions, wt_mat,
+                       title="Monthly Patient Wait Time Trends (# patients)")
+    plt.tight_layout()
+    pdf.savefig(fig4, bbox_inches="tight")
+    plt.close(fig4)

@@ -15,7 +15,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.patches import Ellipse
-from sklearn.decomposition import PCA  # used for robust fallback & small cohorts
+from sklearn.decomposition import PCA  # robust fallback & small cohorts
 
 # --- Gensim (LDA) ---
 try:
@@ -34,14 +34,17 @@ except Exception:
     _HAS_UMAP = False
 
 
+# ===================== Tunable knobs for compact clusters =====================
+PROB_SHARPEN_GAMMA = 1.35   # >1 tightens clusters by sharpening doc-topic dists
+UMAP_MIN_DIST = 0.04        # smaller -> tighter clusters (UMAP)
+UMAP_SPREAD = 0.90          # slightly shrinks global scale (UMAP)
+ELLIPSE_STD_SCALE = 1.35    # ~how many std devs the blob spans (smaller -> tighter)
+# ==============================================================================
+
+
 # ---------------- utilities ----------------
 def _safe_slug(s: str, maxlen: int = 96) -> str:
-    """
-    Turn an arbitrary string into a filesystem-safe slug.
-    - Normalize unicode, lower-case
-    - Replace anything non [A-Za-z0-9._-] with underscore
-    - Collapse repeats and trim length
-    """
+    """Filesystem-safe slug."""
     if s is None:
         return "unnamed"
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")
@@ -131,10 +134,13 @@ def _choose_k(n_texts: int, k_max: int = 8) -> int:
     return max(2, min(k, k_max))
 
 
-def _prep_tokens(texts: List[str], stopwords: set, bigrams: bool = True
-                 ) -> Tuple[List[List[str]], Optional[Any]]:
+def _prep_tokens(
+    texts: List[str],
+    stopwords: set,
+    bigrams: bool = True
+) -> Tuple[List[List[str]], Optional[Any]]:
     """
-    Tokenize and learn phrases: bigrams then trigrams.
+    Tokenize and learn phrases: bigrams, then trigrams (to help detect 2-word phrases cleanly).
     Returns (tokens, phraser).
     """
     tokens = [
@@ -148,7 +154,7 @@ def _prep_tokens(texts: List[str], stopwords: set, bigrams: bool = True
         bigram = Phrases(tokens, min_count=2, threshold=10.0)
         bigram_phraser = Phraser(bigram)
         tokens = [list(bigram_phraser[tok]) for tok in tokens]
-        # learn trigrams
+        # learn trigrams (helps keep multiword units stable)
         trigram = Phrases(tokens, min_count=2, threshold=10.0)
         phraser = Phraser(trigram)
         tokens = [list(phraser[tok]) for tok in tokens]
@@ -171,91 +177,74 @@ def _corpus_from_tokens(tokens: List[List[str]], no_below: int, no_above: float,
     return dictionary, corpus, tokens
 
 
-def _three_word_labels_from_topic(lda: LdaModel, topic_id: int, topn: int = 18) -> List[str]:
+# ---------------- two-word label builder ----------------
+def _two_word_labels_from_topic(lda: LdaModel, topic_id: int, topn: int = 14) -> List[str]:
     """
-    Build three-word labels for a topic.
+    Build two-word labels for a topic.
     Preference order:
-      1) Terms that are trigrams already (contain two underscores)
-      2) Otherwise, combine bigram + single
-      3) Otherwise, combine three singles in order
+      1) tokens that are bigrams (contain one underscore)
+      2) otherwise, adjacent singles combined into two-word phrases
     Underscores are rendered as spaces.
+    Returns up to 3 two-word candidates; first item is used for the legend.
     """
-    terms = [w for w, _ in lda.show_topic(topic_id, topn=topn)]
-    labels, seen = [], set()
+    raw_terms = [w for w, _ in lda.show_topic(topic_id, topn=topn)]
+    labels: List[str] = []
+    seen = set()
 
-    # true trigrams first
-    for w in terms:
-        if w.count("_") >= 2:
+    # take distinct bigrams first
+    for w in raw_terms:
+        if "_" in w and w.count("_") == 1:
             lbl = w.replace("_", " ")
             if lbl not in seen:
-                labels.append(lbl); seen.add(lbl)
-        if len(labels) >= 3:
-            break
-
-    # bigram + single
-    if len(labels) < 3:
-        bigrams = [w for w in terms if w.count("_") == 1]
-        singles = [w for w in terms if "_" not in w]
-        for bg in bigrams:
-            for s in singles:
-                lbl = f"{bg.replace('_',' ')} {s}"
-                if lbl not in seen:
-                    labels.append(lbl); seen.add(lbl)
-                if len(labels) >= 3:
-                    break
+                labels.append(lbl)
+                seen.add(lbl)
             if len(labels) >= 3:
                 break
 
-    # three singles
+    # if not enough, synthesize from adjacent singles
     if len(labels) < 3:
-        singles = [w for w in terms if "_" not in w]
-        for i in range(max(0, len(singles) - 2)):
-            lbl = f"{singles[i]} {singles[i+1]} {singles[i+2]}"
+        singles = [w for w in raw_terms if "_" not in w]
+        for i in range(len(singles) - 1):
+            lbl = f"{singles[i]} {singles[i+1]}"
             if lbl not in seen:
-                labels.append(lbl); seen.add(lbl)
+                labels.append(lbl)
+                seen.add(lbl)
             if len(labels) >= 3:
                 break
 
-    return labels or ["topic theme summary"]
+    if not labels:
+        labels = [(raw_terms[0] if raw_terms else "topic") + " theme"]
+    return labels
 
 
 def _legend_label_from_candidates(cands: List[str]) -> str:
     return cands[0]
 
 
-def _cov_ellipse(X: np.ndarray) -> Tuple[float, float, float]:
+def _cov_ellipse(X: np.ndarray, std_scale: float = ELLIPSE_STD_SCALE) -> Tuple[float, float, float]:
     """
     Return ellipse width, height, angle from 2D covariance of X.
+    std_scale ~ how many standard deviations to draw.
     """
     cov = np.cov(X.T)
     vals, vecs = np.linalg.eigh(cov)
     order = vals.argsort()[::-1]
     vals, vecs = vals[order], vecs[:, order]
     theta = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
-    # protect against tiny negative numerical noise
     vals = np.maximum(vals, 1e-12)
-    # 2 std dev ~ covers ~95% if Gaussian-ish
-    width, height = 2 * 2 * np.sqrt(vals)
+    width, height = 2 * std_scale * np.sqrt(vals)
     return float(width), float(height), float(theta)
 
 
 # ---------- robust 2-D embedding (UMAP with safe init; PCA fallback) ----------
 def _embed_2d(theta: np.ndarray, n_docs: int, random_state: int):
     """
-    Robust 2-D embedding:
-
-    - Handles tiny shapes safely:
-        * n_docs == 0  -> empty (0,2)
-        * n_docs == 1  -> [[0, 0]]
-        * n_features == 0 -> zeros
-        * n_features == 1 -> use that 1D as x, zeros for y
-    - For small cohorts: PCA with dynamic n_components (1 or 2), pad to 2D if needed.
-    - For normal cohorts: try UMAP (init='random'); on any error, fall back to PCA.
+    Robust 2-D embedding with graceful handling of tiny cohorts.
     """
     n_docs = int(theta.shape[0])
     n_feat = int(theta.shape[1]) if theta.ndim == 2 else 0
 
-    # --- trivial/degenerate cases ---
+    # trivial/degenerate cases
     if n_docs == 0:
         return np.zeros((0, 2), dtype=float)
     if n_docs == 1:
@@ -264,32 +253,29 @@ def _embed_2d(theta: np.ndarray, n_docs: int, random_state: int):
         return np.zeros((n_docs, 2), dtype=float)
     if n_feat == 1:
         x = theta[:, 0]
-        # center to avoid all points collapsed in a corner
         x = x - float(x.mean()) if np.std(x) > 0 else np.zeros_like(x)
         return np.column_stack([x, np.zeros(n_docs, dtype=float)])
 
-    # --- helper: safe PCA to 1 or 2 dims, then pad to 2D if needed ---
     def _safe_pca(x: np.ndarray, dims: int) -> np.ndarray:
         m = max(1, min(dims, x.shape[0], x.shape[1]))  # 1 or 2
         xp = PCA(n_components=m, random_state=random_state).fit_transform(x)
         if m == 1:
             return np.column_stack([xp.ravel(), np.zeros(x.shape[0], dtype=float)])
-        return xp  # m == 2
+        return xp
 
-    # For very small cohorts, PCA is more stable than UMAP
     if not _HAS_UMAP or n_docs < 5:
         return _safe_pca(theta, 2)
 
-    # --- try UMAP; fall back to PCA on any hiccup ---
     try:
         n_nbrs = max(2, min(10, n_docs - 1))
         reducer = umap.UMAP(
             n_neighbors=n_nbrs,
             n_components=2,
-            min_dist=0.1,
+            min_dist=UMAP_MIN_DIST,
+            spread=UMAP_SPREAD,
             metric="cosine",
             random_state=random_state,
-            init="random",  # avoids eigsh(k>=N) spectral init on tiny N
+            init="random",  # avoids eigsh issues on tiny N
         )
         return reducer.fit_transform(theta)
     except Exception:
@@ -305,19 +291,28 @@ def _topic_map_figure(
     cmap_name: str = "Blues",
 ):
     """
-    Build a 'datamap' style scatter:
-      - background points (light gray)
+    Compact 'datamap' style scatter with:
+      - faint background points
       - colored clusters
-      - soft covariance ellipse per cluster
-      - centroid text label (3-word phrase)
+      - covariance ellipse per cluster
+      - centroid label (two-word phrase)
+    Tight axis limits to reduce whitespace (no distortion).
     """
+    if X2d.size == 0:
+        fig, ax = plt.subplots(figsize=(8.0, 4.4))
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.set_axis_off()
+        fig.tight_layout()
+        return fig
+
     k = int(np.max(labels)) + 1
     cmap = cm.get_cmap(cmap_name, k + 3)
     colors = [cmap(i + 2) for i in range(k)]
-    fig, ax = plt.subplots(figsize=(10, 10))
+
+    fig, ax = plt.subplots(figsize=(8.4, 4.8))
 
     # faint background
-    ax.scatter(X2d[:, 0], X2d[:, 1], s=6, color=(0.6, 0.6, 0.6, 0.25), linewidths=0)
+    ax.scatter(X2d[:, 0], X2d[:, 1], s=6, color=(0.6, 0.6, 0.6, 0.22), linewidths=0)
 
     # clusters + blobs + labels
     for tid in range(k):
@@ -325,10 +320,11 @@ def _topic_map_figure(
         if not np.any(mask):
             continue
         pts = X2d[mask, :]
+
         ax.scatter(pts[:, 0], pts[:, 1], s=14, color=colors[tid], alpha=0.85, linewidths=0)
 
         try:
-            w, h, ang = _cov_ellipse(pts)
+            w, h, ang = _cov_ellipse(pts, std_scale=ELLIPSE_STD_SCALE)
             cx, cy = pts.mean(axis=0)
             e = Ellipse((cx, cy), width=w, height=h, angle=ang,
                         facecolor=colors[tid], edgecolor="none", alpha=0.18, zorder=0)
@@ -338,16 +334,26 @@ def _topic_map_figure(
 
         cx, cy = pts.mean(axis=0)
         ax.text(cx, cy, topic_labels[tid],
-                fontsize=10, fontweight="semibold",
-                ha="center", va="center",
-                color="black",
-                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.9))
+                fontsize=9.5, fontweight="semibold",
+                ha="center", va="center", color="black",
+                bbox=dict(boxstyle="round,pad=0.22", fc="white", ec="none", alpha=0.9))
 
-    ax.set_title(title, fontsize=14, pad=14)
+    ax.set_title(title, fontsize=11.5, pad=8)
     ax.set_xticks([]); ax.set_yticks([])
     for s in ax.spines.values():
         s.set_visible(False)
-    fig.tight_layout()
+
+    # tight limits
+    x_min, x_max = float(np.min(X2d[:, 0])), float(np.max(X2d[:, 0]))
+    y_min, y_max = float(np.min(X2d[:, 1])), float(np.max(X2d[:, 1]))
+    if x_max <= x_min: x_max = x_min + 1e-3
+    if y_max <= y_min: y_max = y_min + 1e-3
+    x_pad = max(1e-3, 0.07 * (x_max - x_min))
+    y_pad = max(1e-3, 0.07 * (y_max - y_min))
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+    fig.tight_layout(pad=0.2)
     return fig
 
 
@@ -358,9 +364,7 @@ def _render_topic_map_png(
     title: str,
     cmap_name: str = "Blues",
 ) -> bytes:
-    """
-    Convenience: build figure then return PNG bytes.
-    """
+    """Build figure then return PNG bytes."""
     if X2d is None or labels is None or topic_labels is None:
         return b""
     fig = _topic_map_figure(X2d, labels, topic_labels, title, cmap_name=cmap_name)
@@ -390,7 +394,7 @@ def _lda_and_map_for_dept(
       summary_str,
       X2d (num_docs x 2),
       labels (num_docs,),
-      topic_labels (list[str] of length K; 3-word phrases)
+      topic_labels (list[str] of length K; two-word phrases)
     """
     if len(texts) < min_docs:
         return "", None, None, None
@@ -422,13 +426,13 @@ def _lda_and_map_for_dept(
         eval_every=None,
     )
 
-    # 3-word topic labels (and longer label lines for summary)
-    topic_labels_three: List[str] = []
+    # two-word labels (+ longer line for CSV summary)
+    topic_labels_two: List[str] = []
     topic_label_lines: List[str] = []
     for ti in range(k):
-        cands = _three_word_labels_from_topic(lda, ti, topn=max(n_top_terms, 18))
+        cands = _two_word_labels_from_topic(lda, ti, topn=max(n_top_terms, 14))
         legend_label = _legend_label_from_candidates(cands)
-        topic_labels_three.append(legend_label)
+        topic_labels_two.append(legend_label)
         topic_label_lines.append(", ".join(cands))
 
     # Per-doc distributions -> dense (n_docs x k)
@@ -437,6 +441,14 @@ def _lda_and_map_for_dept(
         dist = lda.get_document_topics(bow, minimum_probability=0.0)
         for tid, p in dist:
             theta[i, tid] = p
+
+    # --- tighten clusters by sharpening probabilities ---
+    if PROB_SHARPEN_GAMMA and PROB_SHARPEN_GAMMA != 1.0:
+        theta = np.power(theta, PROB_SHARPEN_GAMMA)
+        rs = theta.sum(axis=1, keepdims=True)
+        rs[rs == 0] = 1.0
+        theta = theta / rs
+
     labels = np.argmax(theta, axis=1)
 
     # Robust 2-D map
@@ -464,7 +476,7 @@ def _lda_and_map_for_dept(
 
     summary = "  ||  ".join(parts)
     # return short labels for plotting
-    return summary, X2d, labels, [f"{topic_labels_three[i]}" for i in range(k)]
+    return summary, X2d, labels, [f"{topic_labels_two[i]}" for i in range(k)]
 
 
 # ---------------- public entry point ----------------
@@ -488,7 +500,7 @@ def run_qualitative(
     keep_n: Optional[int] = 10000,
     bigrams: bool = True,  # emphasize multiword themes
     keep_undated_when_filtering: bool = True,
-    # ---- LEGACY / IGNORED (accepted to avoid TypeError from old control.py) ----
+    # ---- LEGACY / IGNORED (kept for compatibility) ----
     ngram_range: Optional[tuple[int, int]] = None,
     max_features: Optional[int] = None,
     min_df: Optional[int] = None,
@@ -535,7 +547,6 @@ def run_qualitative(
         pos_rows.append({"department": dept, "summary": summary, "method": method})
 
         if X2d is not None:
-            # produce fig + bytes
             fig = _topic_map_figure(X2d, labels, topic_labels, title=f"Positive Themes — {dept}", cmap_name="Blues")
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
@@ -576,7 +587,7 @@ def run_qualitative(
     pos_df = pd.DataFrame(pos_rows, columns=["department", "summary", "method"])
     neg_df = pd.DataFrame(neg_rows, columns=["department", "summary", "method"])
 
-    # Save CSVs (same names as before)
+    # Save CSVs (for reference)
     pos_path = output_dir / "pos_rev_themes.csv"
     neg_path = output_dir / "neg_rev_themes.csv"
     pos_df.to_csv(pos_path, index=False)
