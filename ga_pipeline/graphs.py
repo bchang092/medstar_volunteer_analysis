@@ -128,7 +128,7 @@ def _plot_wait_stacked_submissions(ax, wt_recent: Dict[str, Dict[str, int]]):
         left += vals
 
     ax.set_yticks(y); ax.set_yticklabels(questions)
-    ax.set_xlabel("Number of Volunteer submissions")
+    ax.set_xlabel("Number of Patients")
     ax.set_title("Wait Time Report")
     ax.legend(title="Wait band", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 

@@ -1,0 +1,58 @@
+{
+  "MGSH: 4 East": {
+    "positive_summary": "Patients acknowledged excellent service from doctors, medical assistants, and med techs. Volunteers enjoyed meaningful interactions and reported that nurses were helpful in providing guidance on their first day.",
+    "negative_summary": "Feedback noted that staff members were sometimes slow to respond to call bells. Some patients complained about the noise from beeping machines, and volunteers felt there were periods with little to do when patients were sleeping."
+  },
+  "MGSH: Emergency Department": {
+    "positive_summary": "Staff, including PAs, doctors, and nurses, were praised for being friendly, supportive, and eager to teach. Many patients expressed gratitude for the kind care they received, and the triage process was noted for being fast.",
+    "negative_summary": "Negative feedback highlighted that nurses often appeared overwhelmed and stretched thin, leading to wait times for patients. There were also reports of delayed paperwork and instances where patients were argumentative."
+  },
+  "MGSH: IMC (3 East & 3 West)": {
+    "positive_summary": "Patients reported being extremely happy with their care, specifically mentioning attentive nurses and staff who provided comfort items like blankets and snacks.",
+    "negative_summary": "Significant issues included a six-hour wait for discharge papers and a report of a patient’s persistent pain complaints not being addressed by the nursing staff until the end of a shift."
+  },
+  "MGSH: Inpatient Rehabilitation": {
+    "positive_summary": "The environment was described as welcoming, with volunteers enjoying frequent and positive interactions with both patients and their families.",
+    "negative_summary": "There were no negative reviews reported for this department in the provided source material."
+  },
+  "MGSH: O’Neill 3": {
+    "positive_summary": "Attentive staff were praised for being fast with responses and providing a \"marvelous\" experience. Volunteers helped patients with personal tasks, such as setting up phone lines and social security accounts.",
+    "negative_summary": "Reviews cited a lack of urgency and coordination, including reports of delayed pain medication, rude behavior regarding food requests, and a charge nurse who was described as condescending toward a volunteer."
+  },
+  "MGSH: O’Neill 4": {
+    "positive_summary": "A patient expressed high satisfaction with their recovery process and the assistance provided by the staff during an emergency.",
+    "negative_summary": "One negative review mentioned a patient being annoyed that a nurse would not spoon-feed her, despite the nurse noting the patient was capable of doing it herself."
+  },
+  "MGSH: Preoperative Services": {
+    "positive_summary": "Staff members were described as very nice, and the positive environment led some families to bring treats like cookies for the nursing team.",
+    "negative_summary": "Some patients experienced difficulty waking up after procedures, and others reported feeling consistently cold and needing extra blankets."
+  },
+  "MUMH: 9 West": {
+    "positive_summary": "This department received high marks for kind and attentive nurses who mentored volunteers and engaged in deep, meaningful conversations with patients about their lives and hobbies.",
+    "negative_summary": "Patients sometimes experienced delays in having requests fulfilled, and volunteers noted that the floor could be boring during quiet periods when there was nothing to do."
+  },
+  "MUMH: 4th Floor": {
+    "positive_summary": "Staff were regarded as friendly and welcoming, with nurses actively involving volunteers in tasks. Patients praised the food quality and the informative nature of the doctors.",
+    "negative_summary": "Issues included long delays in sorting out insurance, a report of a patient being left on a toilet for 30 minutes, and an instance of a doctor being rude to a volunteer."
+  },
+  "MUMH: 6 East/IMC-HF": {
+    "positive_summary": "Patients frequently raved about the lovely nurses, with some rating the hospital a 10/10. Volunteers found the staff helpful in orientation and enjoyed learning from them.",
+    "negative_summary": "Criticisms focused on slow responsiveness, miscommunication between healthcare workers, confusion regarding diagnoses, and inconsistent food menu service."
+  },
+  "MUMH: 7 East/IMC": {
+    "positive_summary": "Nurses and techs were described as sweet and supportive, showing gratitude for volunteer assistance. Patients appreciated the companionship and the quick response to many requests.",
+    "negative_summary": "Negatives involved unanswered phones, slow delivery of lunch, and instances of patients being in pain without receiving immediate medication. There was also a report of a guest complaining about uncleaned bodily fluids on curtains."
+  },
+  "MUMH: 8th Floor": {
+    "positive_summary": "Patients expressed immense trust in the hospital, citing prompt and kind nursing teams. Staff went above and beyond, such as buying gifts for patients or helping with complex financial logistics.",
+    "negative_summary": "Concerns were raised about understaffing, particularly in the evenings, leading to long waits for medicine, food, and restroom assistance. There were also reports of poor communication between doctors and physical therapists."
+  },
+  "MUMH: 9 East": {
+    "positive_summary": "The floor staff was appreciated for being compassionate and responsive to pain. Patients and visitors expressed gratitude for the care and the companionship provided by volunteers.",
+    "negative_summary": "Feedback mentioned dissatisfaction with food quality and temperature. There were also reports of delayed communication from doctors regarding updates or discharge paperwork."
+  },
+  "MUMH: Emergency Department": {
+    "positive_summary": "The department was praised for speedy triage, a clean environment, and a kind team that made patients laugh even in vulnerable states. Volunteers felt valued for providing companionship.",
+    "negative_summary": "Negative feedback cited long waits for doctor updates and frustrations with hall beds, which lacked call bells and sometimes had stained linens. One volunteer noted a professional speaking dismissively about a patient's fears."
+  }
+}

@@ -2,12 +2,20 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
 import io
+import re
+import unicodedata
 
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Image,
+    PageBreak,
+    Table,
+    TableStyle,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.graphics.shapes import Drawing, Line
@@ -15,10 +23,15 @@ from reportlab.graphics.shapes import Drawing, Line
 from .graphs import page_for_department
 
 
-# -------- Figure collector for the 4 dashboard plots (Matplotlib -> PNG bytes) --------
+# -------- Figure collector for the dashboard (Matplotlib -> PNG bytes) --------
 class _FigureCollector:
+    """
+    A tiny shim that looks like a PdfPages object, but
+    captures each figure as PNG bytes in memory.
+    """
     def __init__(self):
         self.images: List[bytes] = []
+
     def savefig(self, fig, **kwargs):
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=168, bbox_inches="tight")
@@ -53,13 +66,20 @@ def _styles():
         leading=13.6,
         textColor=colors.HexColor("#111827"),
     )
-    return title, h2, body
+    small = ParagraphStyle(
+        "Small",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=11.5,
+        textColor=colors.HexColor("#4b5563"),
+    )
+    return title, h2, body, small
 
 
 # -------- page decorations (header/footer) --------
 def _page_decorators():
     """
-    No top header (per request).
+    No top header.
     Keep a small page number at the bottom-right.
     """
     def header_footer(canvas, doc):
@@ -77,8 +97,9 @@ def _scale_image_to_box(img: Image, max_w: float, max_h: float) -> None:
     if iw <= 0 or ih <= 0:
         return
     scale = min(max_w / iw, max_h / ih)
-    img.drawWidth  = iw * scale
+    img.drawWidth = iw * scale
     img.drawHeight = ih * scale
+
 
 def _image_from_png_bytes(png_bytes: Optional[bytes], max_w: float, max_h: float) -> Optional[Image]:
     if not png_bytes:
@@ -87,15 +108,77 @@ def _image_from_png_bytes(png_bytes: Optional[bytes], max_w: float, max_h: float
     _scale_image_to_box(img, max_w, max_h)
     return img
 
-def _image_from_mpl_fig(fig, max_w: float, max_h: float) -> Optional[Image]:
-    if fig is None:
-        return None
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
-    buf.seek(0)
-    img = Image(buf)
-    _scale_image_to_box(img, max_w, max_h)
-    return img
+
+def _norm_dept(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u00a0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _summary_for_department(df: Optional[Any], dept: str) -> str:
+    """
+    Given pos_theme_df/neg_theme_df with columns ['department','summary','method'],
+    return the first non-empty summary string for that department.
+    Uses normalized dept matching to avoid unicode/whitespace mismatches.
+    """
+    if df is None:
+        return ""
+    try:
+        if df.empty or "department" not in df.columns or "summary" not in df.columns:
+            return ""
+    except AttributeError:
+        return ""
+
+    dept_n = _norm_dept(dept)
+    # build normalized lookup
+    dep_col = df["department"].fillna("").astype(str).map(_norm_dept)
+    sub = df[dep_col == dept_n]
+    if sub.empty:
+        return ""
+    texts = [str(s).strip() for s in sub["summary"].fillna("").tolist() if str(s).strip()]
+    return texts[0] if texts else ""
+
+
+def _format_review_stats_line(review_stats: Optional[Dict[str, Any]]) -> str:
+    """
+    Small line under the title:
+      "Volunteer submissions: total 123 | 2025-11: 17 (pos 9, neg 8)"
+    """
+    if not review_stats:
+        return ""
+
+    total = int(review_stats.get("total_reviews", 0) or 0)
+    lm = str(review_stats.get("latest_month", "") or "").strip()
+    lm_total = int(review_stats.get("latest_month_total_reviews", 0) or 0)
+    lm_pos = int(review_stats.get("latest_month_positive_reviews", 0) or 0)
+    lm_neg = int(review_stats.get("latest_month_negative_reviews", 0) or 0)
+
+    if not lm:
+        return f"Volunteer submissions: total <b>{total}</b>"
+
+    return (
+        f"Volunteer submissions: total <b>{total}</b> "
+        f"| <b>{lm}</b>: <b>{lm_total}</b> "
+        f"(pos {lm_pos}, neg {lm_neg})"
+    )
+
+
+def _dept_sort_key(dept: str):
+    """
+    Order PDF pages:
+      - MUMH first
+      - MGSH second
+      - everything else after
+    Then alphabetical within each group.
+    """
+    d = _norm_dept(dept)
+    prefix = d.split(":", 1)[0].strip().upper() if ":" in d else ""
+    order = {"MUMH": 0, "MGSH": 1}
+    return (order.get(prefix, 99), d)
 
 
 # -------- one-page layout per department --------
@@ -110,23 +193,20 @@ def _dept_page_flowables(
     date_end: Optional[str],
     frame_w: float,
     frame_h: float,
-    pos_topic_fig,   # Matplotlib Figure (Positive) or None
-    neg_topic_fig,   # Matplotlib Figure (Negative) or None
+    pos_summary: str,
+    neg_summary: str,
+    review_stats: Optional[Dict[str, Any]],
 ) -> List:
     """
-    Layout:
+    Layout (single page):
       Title line: "<DEPT> — Monthly Dashboard (Window: ...)"
-      Divider line
-      ┌──────────────────────────────────────────────────────────────┐
-      │ [Chart1]              │  [Chart3]                           │
-      │ [Chart2]              │  [Chart4]                           │   <-- Top: two vertical stacks
-      ├──────────────────────────────────────────────────────────────┤
-      │ [ Positive topic map ]   [ Negative topic map ]              │   <-- Bottom: boxed
-      └──────────────────────────────────────────────────────────────┘
+      Stats line: "Volunteer submissions: total ... | latest_month: ..."
+      Thin divider
+      [  2×2 grid of the four dashboard charts (PNG images)    ]
+      [  Bottom row: Positive & Negative themes text boxes      ]
     """
-    _, h2, _ = _styles()
+    _, h2, body, small = _styles()
 
-    # --- Header line text with window inline ---
     window_str = ""
     if date_start or date_end:
         s = date_start or "…"
@@ -135,112 +215,108 @@ def _dept_page_flowables(
 
     heading = Paragraph(f"<b>{dept}</b> — Monthly Dashboard {window_str}", h2)
 
-    # Divider under header
+    stats_line = _format_review_stats_line(review_stats)
+    stats_para = Paragraph(stats_line, small) if stats_line else None
+
     divider = Drawing(frame_w, 0.2 * inch)
     divider.add(Line(0, 0, frame_w, 0, strokeColor=colors.HexColor("#94a3b8"), strokeWidth=1.1))
 
-    # Collect the 4 dashboard plots (PNG bytes)
     collector = _FigureCollector()
     page_for_department(
-        collector, dept, months, monthly_data, dep_service, dep_wait,
-        date_start=date_start, date_end=date_end
-    )
-    charts = collector.images[:4] + [None] * max(0, 4 - len(collector.images))
-
-    # --- compact vertical proportions to ensure single-page fit ---
-    top_h_share    = 0.50       # top area
-    bottom_h_share = 0.36       # bottom area
-    v_gap          = 0.04 * inch
-    col_gutter     = 0.14 * inch
-
-    # --- TOP: two vertical stacks (each = two charts stacked) ---
-    top_h = frame_h * top_h_share
-    left_col_w = (frame_w - col_gutter) / 2.0
-    right_col_w = left_col_w
-    stack_gap = 0.04 * inch
-    stack_row_h = (top_h - stack_gap) / 2.0
-
-    left_stack = Table(
-        [[_image_from_png_bytes(charts[0], left_col_w, stack_row_h)],
-         [_image_from_png_bytes(charts[1], left_col_w, stack_row_h)]],
-        colWidths=[left_col_w],
-        rowHeights=[stack_row_h, stack_row_h],
-        hAlign="LEFT",
-        style=TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ])
-    )
-
-    right_stack = Table(
-        [[_image_from_png_bytes(charts[2], right_col_w, stack_row_h)],
-         [_image_from_png_bytes(charts[3], right_col_w, stack_row_h)]],
-        colWidths=[right_col_w],
-        rowHeights=[stack_row_h, stack_row_h],
-        hAlign="LEFT",
-        style=TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ])
-    )
-
-    top_row = Table(
-        [[left_stack, right_stack]],
-        colWidths=[left_col_w, right_col_w],
-        rowHeights=[top_h],
-        hAlign="LEFT",
-        style=TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ("LINEAFTER", (0, 0), (0, 0), 0.8, colors.HexColor("#cbd5e1")),  # vertical divider
-        ])
-    )
-
-    # --- BOTTOM: two qualitative plots side-by-side (boxed) ---
-    bottom_h = frame_h * bottom_h_share
-    q_col_w = (frame_w - col_gutter) / 2.0
-    q_row_h = bottom_h
-
-    pos_img = _image_from_mpl_fig(pos_topic_fig, q_col_w, q_row_h)
-    neg_img = _image_from_mpl_fig(neg_topic_fig, q_col_w, q_row_h)
-
-    bottom_row = Table(
-        [[pos_img, neg_img]],
-        colWidths=[q_col_w, q_col_w],
-        rowHeights=[q_row_h],
-        hAlign="LEFT",
-        style=TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ("BOX", (0, 0), (0, 0), 1, colors.HexColor("#94a3b8")),
-            ("BOX", (1, 0), (1, 0), 1, colors.HexColor("#94a3b8")),
-        ])
+        collector,
+        dept,
+        months,
+        monthly_data,
+        dep_service,
+        dep_wait,
+        date_start=date_start,
+        date_end=date_end,
     )
 
     flows: List = []
     flows.append(heading)
+    if stats_para:
+        flows.append(Spacer(1, 0.02 * inch))
+        flows.append(stats_para)
+
     flows.append(Spacer(1, 0.04 * inch))
     flows.append(divider)
-    flows.append(Spacer(1, 0.08 * inch))
-    flows.append(top_row)
-    flows.append(Spacer(1, v_gap))
-    flows.append(bottom_row)
+    flows.append(Spacer(1, 0.10 * inch))
+
+    if collector.images:
+        max_chart_w = frame_w / 2.0 - 0.10 * inch
+        max_chart_h = frame_h * 0.24
+
+        imgs: List[Optional[Image]] = [
+            _image_from_png_bytes(b, max_w=max_chart_w, max_h=max_chart_h)
+            for b in collector.images[:4]
+        ]
+        while len(imgs) < 4:
+            imgs.append(None)
+
+        def _cell(content):
+            return content if content is not None else Spacer(1, 0.05 * inch)
+
+        grid = Table(
+            [
+                [_cell(imgs[0]), _cell(imgs[1])],
+                [_cell(imgs[2]), _cell(imgs[3])],
+            ],
+            colWidths=[max_chart_w, max_chart_w],
+            rowHeights=[max_chart_h, max_chart_h],
+            hAlign="LEFT",
+            style=TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]),
+        )
+
+        flows.append(grid)
+        flows.append(Spacer(1, 0.18 * inch))
+    else:
+        flows.append(Paragraph("(No dashboard data available.)", small))
+        flows.append(Spacer(1, 0.20 * inch))
+
+    # --- Bottom: Positive / Negative theme summary boxes ---
+    pos_text = pos_summary or "(Insufficient data for a positive themes summary.)"
+    neg_text = neg_summary or "(Insufficient data for a negative themes summary.)"
+
+    pos_para = Paragraph(
+        "<b>Positive themes</b><br/><font size=9 color='#4b5563'>"
+        + pos_text.replace("\n", "<br/>")
+        + "</font>",
+        body,
+    )
+    neg_para = Paragraph(
+        "<b>Negative themes</b><br/><font size=9 color='#4b5563'>"
+        + neg_text.replace("\n", "<br/>")
+        + "</font>",
+        body,
+    )
+
+    col_w = (frame_w - 0.12 * inch) / 2.0
+    bottom_table = Table(
+        [[pos_para, neg_para]],
+        colWidths=[col_w, col_w],
+        hAlign="LEFT",
+        style=TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("BOX", (0, 0), (0, 0), 0.8, colors.HexColor("#d1d5db")),
+            ("BOX", (1, 0), (1, 0), 0.8, colors.HexColor("#d1d5db")),
+            ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#f9fafb")),
+            ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#f9fafb")),
+        ]),
+    )
+
+    flows.append(bottom_table)
     return flows
 
 
@@ -253,57 +329,76 @@ def build_pdf(
     dep_wait: Dict[str, Any],
     months: List[str],
     *,
-    # Preferred new args: pass live Matplotlib figures for qualitative
-    pos_theme_figs_mpl: Optional[Dict[str, Any]] = None,  # {dept: Matplotlib Figure}
-    neg_theme_figs_mpl: Optional[Dict[str, Any]] = None,  # {dept: Matplotlib Figure}
-    # Legacy args accepted (ignored here, kept for compatibility)
     pos_theme_df: Optional[Any] = None,
     neg_theme_df: Optional[Any] = None,
-    pos_theme_figs: Optional[Dict[str, bytes]] = None,
-    neg_theme_figs: Optional[Dict[str, bytes]] = None,
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
+    review_stats: Optional[Dict[str, Any]] = None,  # NEW
 ):
-    pos_theme_figs_mpl = pos_theme_figs_mpl or {}
-    neg_theme_figs_mpl = neg_theme_figs_mpl or {}
-
-    # Smaller page margins to maximize space (landscape letter)
+    """
+    Build the PDF:
+      • Cover page
+      • One page per department:
+          - Four dashboard charts in a 2×2 grid
+          - Positive & Negative qualitative summaries as text boxes
+          - Stats line under title (total + latest-month submissions)
+    """
     pagesize = landscape(letter)
     doc = SimpleDocTemplate(
         str(output_pdf_path),
         pagesize=pagesize,
-        leftMargin=0.6 * inch, rightMargin=0.6 * inch,
-        topMargin=0.65 * inch, bottomMargin=0.6 * inch,
-        title="Volunteer Rounding Report", author="MedStar Volunteer Analysis",
+        leftMargin=0.6 * inch,
+        rightMargin=0.6 * inch,
+        topMargin=0.65 * inch,
+        bottomMargin=0.6 * inch,
+        title="Volunteer Rounding Report",
+        author="MedStar Volunteer Analysis",
     )
 
     frame_w, frame_h = doc.width, doc.height
-    title_style, _, body = _styles()
+    title_style, _, body, _ = _styles()
     story: List = []
 
-    # Cover
+    # ----- Cover page -----
     if months or (date_start or date_end):
         story.append(Paragraph("Monthly Volunteer Rounding Report", title_style))
         if months:
             story.append(Paragraph(f"Latest month: <b>{months[-1]}</b>", body))
         if date_start or date_end:
-            s = date_start or "…"; e = date_end or "…"
+            s = date_start or "…"
+            e = date_end or "…"
             story.append(Paragraph(f"Window: {s} → {e}", body))
+
+        if review_stats:
+            story.append(Spacer(1, 0.08 * inch))
+            story.append(Paragraph(_format_review_stats_line(review_stats), body))
+
         story.append(Spacer(1, 0.24 * inch))
         story.append(PageBreak())
 
-    # Per-department pages
-    depts = list(department_ind_dict.keys())
-    for i, dept in enumerate(depts):
-        pos_fig = pos_theme_figs_mpl.get(dept)
-        neg_fig = neg_theme_figs_mpl.get(dept)
+    # ----- Per-department pages -----
+    depts = sorted(list(department_ind_dict.keys()), key=_dept_sort_key)
 
-        story.extend(_dept_page_flowables(
-            dept, months, monthly_data, dep_service, dep_wait,
-            date_start=date_start, date_end=date_end,
-            frame_w=frame_w, frame_h=frame_h,
-            pos_topic_fig=pos_fig, neg_topic_fig=neg_fig
-        ))
+    for i, dept in enumerate(depts):
+        pos_summary = _summary_for_department(pos_theme_df, dept)
+        neg_summary = _summary_for_department(neg_theme_df, dept)
+
+        story.extend(
+            _dept_page_flowables(
+                dept,
+                months,
+                monthly_data,
+                dep_service,
+                dep_wait,
+                date_start=date_start,
+                date_end=date_end,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                pos_summary=pos_summary,
+                neg_summary=neg_summary,
+                review_stats=review_stats,
+            )
+        )
         if i < len(depts) - 1:
             story.append(PageBreak())
 
