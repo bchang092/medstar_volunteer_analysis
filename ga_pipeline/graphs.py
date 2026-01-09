@@ -132,19 +132,17 @@ def _qty_to_band(qty: Optional[int]) -> Optional[str]:
         return "6+"
     return None
 
-def _previous_month_key(months: List[str]) -> Optional[str]:
+def _pick_snapshot_month(months: List[str], month_of_analysis: Optional[str]) -> Optional[str]:
     """
-    months are like 'YYYY-MM'. We interpret 'previous month' as calendar month
-    immediately before the latest available month in your data.
+    Choose the month to show in the monthly (snapshot) charts.
+    Prefer an explicit month_of_analysis if it exists in the data; otherwise
+    fall back to the latest month available.
     """
     if not months:
         return None
-    try:
-        latest = pd.Period(months[-1], freq="M")
-        prev = (latest - 1).strftime("%Y-%m")
-        return prev if prev in months else months[-1]
-    except Exception:
-        return months[-1]
+    if month_of_analysis and month_of_analysis in months:
+        return month_of_analysis
+    return months[-1]
 
 # ---------------------------------------------------------------------
 # TOP-LEFT: Services snapshot (STACKED, horizontal; volunteer submissions)
@@ -346,6 +344,7 @@ def page_for_department(
     *,
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
+    month_of_analysis: Optional[str] = None,
 ):
     """
     Render four independent figures (NOT a single 2×2 figure):
@@ -354,7 +353,7 @@ def page_for_department(
       3) Services heatmap (monthly)
       4) Wait heatmap (monthly)
     """
-    recent = _previous_month_key(months) if months else None
+    recent = _pick_snapshot_month(months, month_of_analysis) if months else None
 
     svc_recent = monthly_data.get(recent, {}).get("service", {}).get(dept, {}) if recent else {}
     wt_recent  = monthly_data.get(recent, {}).get("wait", {}).get(dept, {}) if recent else {}

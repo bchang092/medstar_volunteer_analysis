@@ -22,6 +22,7 @@ RUN_NOTEBOOKLM_FLOW = True      # Create copy/paste pack, pause, ingest Notebook
 BUILD_GRAPHS        = True
 ASSEMBLE_PDF        = True
 
+OUTPUT_FOLDER_NAME = "2025-12-31"
 excel_name        = "01062026_Rounding_Surveys.xlsx"
 OUTPUT_PDF_NAME   = "01062026_results_qual_v3.pdf"
 
@@ -29,9 +30,17 @@ OUTPUT_PDF_NAME   = "01062026_results_qual_v3.pdf"
 NOTEBOOKLM_PACK_PDF_NAME    = "NotebookLM_CopyPaste_Pack.pdf"
 NOTEBOOKLM_OUTPUT_FILENAME  = "notebooklm_outputs.csv"  # you will place this into OUTPUT_DIR
 
-# Optional date window (used for both processing + labels)
-DATE_START = "2025-06-30"   # or None
-DATE_END   = "2025-12-31"   # or None
+# Analysis windows
+# MONTH_OF_ANALYSIS: the single month to highlight in “Monthly” charts (YYYY-MM)
+# QUARTER_START / QUARTER_END: bounds for the quarter (date strings) used to filter data and drive quarter heatmaps
+MONTH_OF_ANALYSIS = "2025-12"  # e.g., "2025-10"
+QUARTER_START     = "2025-06-01"
+QUARTER_END       = "2025-12-31"
+
+
+# Keep legacy names for processing/report compatibility
+DATE_START = QUARTER_START
+DATE_END   = QUARTER_END
 
 # ----------------------------
 # Inputs / Outputs
@@ -39,6 +48,7 @@ DATE_END   = "2025-12-31"   # or None
 DATA_PATH   = Path("data") / excel_name
 OUTPUT_DIR  = Path("outputs") / (DATE_END or "latest")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+print(f"[paths] Writing outputs to: {OUTPUT_DIR}")
 
 
 def compute_review_stats(df, months, date_col="date", pos_col="pos_exp", neg_col="neg_exp"):
@@ -197,6 +207,7 @@ def main():
 
             date_start=DATE_START,
             date_end=DATE_END,
+            month_of_analysis=MONTH_OF_ANALYSIS,
         )
 
     print("Done!")

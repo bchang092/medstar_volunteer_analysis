@@ -18,7 +18,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.graphics.shapes import Drawing, Line
+from reportlab.graphics.shapes import Drawing, Line, Rect
 
 from .graphs import page_for_department
 
@@ -167,6 +167,95 @@ def _format_review_stats_line(review_stats: Optional[Dict[str, Any]]) -> str:
     )
 
 
+def _cover_page_flowables(
+    frame_w: float,
+    frame_h: float,
+    month_of_analysis: Optional[str],
+    date_start: Optional[str],
+    date_end: Optional[str],
+    review_stats: Optional[Dict[str, Any]],
+):
+    """
+    Build a simple, centered cover page with a solid backdrop.
+    """
+    title_style, _, body, _ = _styles()
+
+    # palette
+    bg = colors.HexColor("#0b1f36")
+    accent = colors.HexColor("#d9a35a")
+    text_main = colors.white
+    text_sub = colors.HexColor("#e5e7eb")
+
+    month_str = month_of_analysis or "Not specified"
+    quarter_str = f"{date_start or '…'} → {date_end or '…'}"
+    stats_line = _format_review_stats_line(review_stats)
+
+    title_para = Paragraph("Volunteer Rounding Report", title_style.clone(
+        "CoverTitle",
+        fontSize=30,
+        leading=36,
+        textColor=text_main,
+        spaceAfter=14,
+    ))
+    subtitle_para = Paragraph(
+        f"Month of analysis: <b>{month_str}</b><br/>Quarter window: <b>{quarter_str}</b>",
+        body.clone("CoverBody", textColor=text_main, fontSize=12.5, leading=16),
+    )
+    stats_para = Paragraph(
+        stats_line or "",
+        body.clone("CoverStats", textColor=text_sub, fontSize=11, leading=14),
+    ) if stats_line else None
+
+    content = [
+        Spacer(1, frame_h * 0.18),
+        title_para,
+        subtitle_para,
+    ]
+    if stats_para:
+        content.extend([Spacer(1, 8), stats_para])
+    content.append(Spacer(1, frame_h * 0.10))
+
+    inner = Table(
+        [[c] for c in content],
+        colWidths=[frame_w * 0.7],
+        style=TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 16),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]),
+    )
+
+    cover = Table(
+        [[inner]],
+        colWidths=[frame_w],
+        rowHeights=[frame_h * 0.9],
+        style=TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), bg),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), frame_w * 0.08),
+            ("RIGHTPADDING", (0, 0), (-1, -1), frame_w * 0.08),
+            ("TOPPADDING", (0, 0), (-1, -1), frame_h * 0.05),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), frame_h * 0.05),
+        ]),
+    )
+
+    accent_rule = Table(
+        [[Spacer(1, 0.2 * inch)]],
+        colWidths=[frame_w * 0.25],
+        style=TableStyle([
+            ("LINEABOVE", (0, 0), (-1, -1), 2, accent),
+            ("BACKGROUND", (0, 0), (-1, -1), None),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]),
+    )
+
+    return [cover, Spacer(1, 6), accent_rule, PageBreak()]
+
+
 def _dept_sort_key(dept: str):
     """
     Order PDF pages:
@@ -191,6 +280,7 @@ def _dept_page_flowables(
     *,
     date_start: Optional[str],
     date_end: Optional[str],
+    month_of_analysis: Optional[str],
     frame_w: float,
     frame_h: float,
     pos_summary: str,
@@ -231,6 +321,7 @@ def _dept_page_flowables(
         dep_wait,
         date_start=date_start,
         date_end=date_end,
+        month_of_analysis=month_of_analysis,
     )
 
     flows: List = []
@@ -243,31 +334,61 @@ def _dept_page_flowables(
     flows.append(divider)
     flows.append(Spacer(1, 0.10 * inch))
 
-    if collector.images:
-        max_chart_w = frame_w / 2.0 - 0.10 * inch
-        max_chart_h = frame_h * 0.24
+    # Submission counts (month + quarter)
+    def _submissions_for_month(m: Optional[str]) -> int:
+        if not m:
+            return 0
+        try:
+            return int(monthly_data.get(m, {}).get("submissions", {}).get(dept, 0) or 0)
+        except Exception:
+            return 0
 
-        imgs: List[Optional[Image]] = [
-            _image_from_png_bytes(b, max_w=max_chart_w, max_h=max_chart_h)
-            for b in collector.images[:4]
+    snapshot_month = None
+    if months:
+        if month_of_analysis and month_of_analysis in months:
+            snapshot_month = month_of_analysis
+        else:
+            snapshot_month = months[-1]
+    month_submissions = _submissions_for_month(snapshot_month)
+    quarter_submissions = sum(_submissions_for_month(m) for m in months)
+    if snapshot_month or months:
+        counts_line = (
+            f"Reviews — Month {snapshot_month or 'N/A'}: <b>{month_submissions}</b> | "
+            f"Quarter: <b>{quarter_submissions}</b>"
+        )
+        flows.append(Paragraph(counts_line, small))
+        flows.append(Spacer(1, 0.06 * inch))
+
+    if collector.images:
+        col_w = frame_w / 2.0 - 0.08 * inch
+        max_month_h = frame_h * 0.30
+        max_qtr_h = frame_h * 0.30
+
+        imgs_month: List[Optional[Image]] = [
+            _image_from_png_bytes(b, max_w=col_w, max_h=max_month_h)
+            for b in collector.images[:2]
         ]
-        while len(imgs) < 4:
-            imgs.append(None)
+        imgs_qtr: List[Optional[Image]] = [
+            _image_from_png_bytes(b, max_w=col_w, max_h=max_qtr_h)
+            for b in collector.images[2:4]
+        ]
+        while len(imgs_month) < 2:
+            imgs_month.append(None)
+        while len(imgs_qtr) < 2:
+            imgs_qtr.append(None)
 
         def _cell(content):
             return content if content is not None else Spacer(1, 0.05 * inch)
 
-        grid = Table(
+        left_table = Table(
             [
-                [_cell(imgs[0]), _cell(imgs[1])],
-                [_cell(imgs[2]), _cell(imgs[3])],
+                [Paragraph(f"<b>Monthly ({snapshot_month or 'latest'}) Report</b>", small)],
+                [_cell(imgs_month[0])],
+                [Spacer(1, 0.08 * inch)],
+                [_cell(imgs_month[1])],
             ],
-            colWidths=[max_chart_w, max_chart_w],
-            rowHeights=[max_chart_h, max_chart_h],
-            hAlign="LEFT",
+            colWidths=[col_w],
             style=TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                 ("TOPPADDING", (0, 0), (-1, -1), 2),
@@ -275,8 +396,37 @@ def _dept_page_flowables(
             ]),
         )
 
-        flows.append(grid)
-        flows.append(Spacer(1, 0.18 * inch))
+        right_table = Table(
+            [
+                [Paragraph("<b>Quarterly Report</b>", small)],
+                [_cell(imgs_qtr[0])],
+                [Spacer(1, 0.08 * inch)],
+                [_cell(imgs_qtr[1])],
+            ],
+            colWidths=[col_w],
+            style=TableStyle([
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]),
+        )
+
+        combo = Table(
+            [[left_table, right_table]],
+            colWidths=[col_w, col_w],
+            style=TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]),
+        )
+
+        flows.append(combo)
+        flows.append(Spacer(1, 0.12 * inch))
     else:
         flows.append(Paragraph("(No dashboard data available.)", small))
         flows.append(Spacer(1, 0.20 * inch))
@@ -334,12 +484,14 @@ def build_pdf(
     date_start: Optional[str] = None,
     date_end: Optional[str] = None,
     review_stats: Optional[Dict[str, Any]] = None,  # NEW
+    month_of_analysis: Optional[str] = None,
 ):
     """
     Build the PDF:
       • Cover page
       • One page per department:
-          - Four dashboard charts in a 2×2 grid
+          - Left: monthly charts for selected month
+          - Right: quarter heatmaps (within date window)
           - Positive & Negative qualitative summaries as text boxes
           - Stats line under title (total + latest-month submissions)
     """
@@ -360,21 +512,7 @@ def build_pdf(
     story: List = []
 
     # ----- Cover page -----
-    if months or (date_start or date_end):
-        story.append(Paragraph("Monthly Volunteer Rounding Report", title_style))
-        if months:
-            story.append(Paragraph(f"Latest month: <b>{months[-1]}</b>", body))
-        if date_start or date_end:
-            s = date_start or "…"
-            e = date_end or "…"
-            story.append(Paragraph(f"Window: {s} → {e}", body))
-
-        if review_stats:
-            story.append(Spacer(1, 0.08 * inch))
-            story.append(Paragraph(_format_review_stats_line(review_stats), body))
-
-        story.append(Spacer(1, 0.24 * inch))
-        story.append(PageBreak())
+    story.extend(_cover_page_flowables(frame_w, frame_h, month_of_analysis, date_start, date_end, review_stats))
 
     # ----- Per-department pages -----
     depts = sorted(list(department_ind_dict.keys()), key=_dept_sort_key)
@@ -392,6 +530,7 @@ def build_pdf(
                 dep_wait,
                 date_start=date_start,
                 date_end=date_end,
+                month_of_analysis=month_of_analysis,
                 frame_w=frame_w,
                 frame_h=frame_h,
                 pos_summary=pos_summary,
