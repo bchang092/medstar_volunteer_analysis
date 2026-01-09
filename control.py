@@ -3,7 +3,7 @@ from pathlib import Path
 import logging
 import pandas as pd
 
-from ga_pipeline import processing, report, qualitative
+from ga_pipeline import processing, report
 from ga_pipeline.notebooklm_packager import (
     notebooklm_pdf_workflow,
     load_summary_library,
@@ -19,12 +19,11 @@ logging.basicConfig(
 # ----------------------------
 PROCESS_DATA        = True
 RUN_NOTEBOOKLM_FLOW = True      # Create copy/paste pack, pause, ingest NotebookLM outputs
-RUN_FALLBACK_TLDR   = True      # If NotebookLM missing/invalid, fall back to TF-IDF TL;DR
 BUILD_GRAPHS        = True
 ASSEMBLE_PDF        = True
 
-excel_name        = "1106_rounding_survey.xlsx"
-OUTPUT_PDF_NAME   = "1106_results_qual.pdf"
+excel_name        = "01062026_Rounding_Surveys.xlsx"
+OUTPUT_PDF_NAME   = "01062026_results_qual_v3.pdf"
 
 # NotebookLM files (you control these names)
 NOTEBOOKLM_PACK_PDF_NAME    = "NotebookLM_CopyPaste_Pack.pdf"
@@ -32,7 +31,7 @@ NOTEBOOKLM_OUTPUT_FILENAME  = "notebooklm_outputs.csv"  # you will place this in
 
 # Optional date window (used for both processing + labels)
 DATE_START = "2025-06-30"   # or None
-DATE_END   = "2025-11-06"   # or None
+DATE_END   = "2025-12-31"   # or None
 
 # ----------------------------
 # Inputs / Outputs
@@ -41,23 +40,21 @@ DATA_PATH   = Path("data") / excel_name
 OUTPUT_DIR  = Path("outputs") / (DATE_END or "latest")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def compute_review_stats(df, months, date_col="date", pos_col="pos_exp", neg_col="neg_exp"):
-    # totals (all time / filtered window)
     def _nonempty(x):
         return (x.notna()) & (x.astype(str).str.strip() != "")
 
-    total_pos = int(_nonempty(df[pos_col]).sum()) if pos_col in df.columns else 0
-    total_neg = int(_nonempty(df[neg_col]).sum()) if neg_col in df.columns else 0
+    total_pos = int(_nonempty(df[pos_col]).sum()) if (df is not None and pos_col in df.columns) else 0
+    total_neg = int(_nonempty(df[neg_col]).sum()) if (df is not None and neg_col in df.columns) else 0
     total_all = total_pos + total_neg
 
     latest_month = months[-1] if months else None
     latest_pos = latest_neg = latest_all = 0
 
-    if latest_month and date_col in df.columns:
-        # months in your pipeline are strings like "YYYY-MM"
+    if df is not None and latest_month and date_col in df.columns:
         latest_period = pd.Period(latest_month, freq="M")
         m = df[date_col].dt.to_period("M") == latest_period
-
         if pos_col in df.columns:
             latest_pos = int((_nonempty(df[pos_col]) & m).sum())
         if neg_col in df.columns:
@@ -76,10 +73,6 @@ def compute_review_stats(df, months, date_col="date", pos_col="pos_exp", neg_col
 
 
 def _themes_df_from_library(lib: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Convert NotebookLM summary library dict into pos/neg theme DataFrames
-    (what report.build_pdf expects).
-    """
     rows_pos, rows_neg = [], []
 
     for dept, payload in (lib or {}).items():
@@ -93,6 +86,21 @@ def _themes_df_from_library(lib: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     pos_df = pd.DataFrame(rows_pos, columns=["department", "summary", "method"])
     neg_df = pd.DataFrame(rows_neg, columns=["department", "summary", "method"])
     return pos_df, neg_df
+
+
+def _write_notebooklm_status(output_dir: Path, ok: bool, reason: str = "") -> None:
+    p = output_dir / "notebooklm_STATUS.txt"
+    if ok:
+        txt = "SUCCESS: NotebookLM summaries were loaded successfully.\n"
+    else:
+        txt = (
+            "FAILURE: NotebookLM summaries were NOT loaded.\n"
+            f"Reason: {reason}\n"
+        )
+    try:
+        p.write_text(txt)
+    except Exception:
+        pass
 
 
 def main():
@@ -114,7 +122,7 @@ def main():
     months = artifacts.get("months", [])
     stats = compute_review_stats(df, months)
 
-    logging.getLogger("control").info( 
+    logging.getLogger("control").info(
         "Review stats: total=%d (pos=%d, neg=%d); latest_month=%s total=%d (pos=%d, neg=%d)",
         stats["total_reviews"],
         stats["total_positive_reviews"],
@@ -125,7 +133,6 @@ def main():
         stats["latest_month_negative_reviews"],
     )
 
-    # also save to outputs for quick reference
     stats_path = OUTPUT_DIR / "review_stats.csv"
     pd.DataFrame([stats]).to_csv(stats_path, index=False)
     print(f"[stats] Wrote {stats_path}")
@@ -134,14 +141,12 @@ def main():
     pos_theme_df = pd.DataFrame(columns=["department", "summary", "method"])
     neg_theme_df = pd.DataFrame(columns=["department", "summary", "method"])
 
-    # ---------------- [2/3] NOTEBOOKLM FIRST ----------------
+    # ---------------- [2/3] NOTEBOOKLM ONLY ----------------
     notebooklm_used = False
 
     if RUN_NOTEBOOKLM_FLOW:
-        print("[2/3] NotebookLM copy/paste workflow (first priority)...")
+        print("[2/3] NotebookLM copy/paste workflow (only path)...")
 
-        # Create pack PDF and wait for your exported output file.
-        # If you already have summaries, you can still just press Enter to skip waiting.
         notebooklm_pdf_workflow(
             pos_texts_by_dept=artifacts.get("pos_texts_by_dept", {}),
             neg_texts_by_dept=artifacts.get("neg_texts_by_dept", {}),
@@ -150,7 +155,6 @@ def main():
             notebooklm_output_filename=NOTEBOOKLM_OUTPUT_FILENAME,
             date_start=DATE_START,
             date_end=DATE_END,
-            # no fallback summaries injected into pack: NotebookLM is the priority
             fallback_pos_summaries=None,
             fallback_neg_summaries=None,
         )
@@ -161,28 +165,19 @@ def main():
         if len(npos) or len(nneg):
             pos_theme_df, neg_theme_df = npos, nneg
             notebooklm_used = True
-            logging.getLogger("control").info(
-                "Using NotebookLM summaries (pos=%d, neg=%d).", len(npos), len(nneg)
-            )
+            msg = f"Using NotebookLM summaries (pos={len(npos)}, neg={len(nneg)})."
+            logging.getLogger("control").info(msg)
+            print("[NotebookLM]", msg)
+            _write_notebooklm_status(OUTPUT_DIR, ok=True)
         else:
-            logging.getLogger("control").warning(
-                "NotebookLM summaries not found or invalid. Will fall back if enabled."
+            reason = (
+                "Summary library was empty or invalid. "
+                f"Expected to find '{NOTEBOOKLM_OUTPUT_FILENAME}' in {OUTPUT_DIR} "
+                "and for it to contain department summaries."
             )
-
-    # ---------------- [2b] FALLBACK TL;DR (TF-IDF only) ----------------
-    if (not notebooklm_used) and RUN_FALLBACK_TLDR:
-        print("[2b] Falling back to TF-IDF TL;DR qualitative summaries...")
-        pos_theme_df, neg_theme_df, _ = qualitative.run_qualitative(
-            pos_texts_by_dept=artifacts.get("pos_texts_by_dept", {}),
-            neg_texts_by_dept=artifacts.get("neg_texts_by_dept", {}),
-            output_dir=OUTPUT_DIR,
-            date_start=DATE_START,
-            date_end=DATE_END,
-            min_docs=5,
-            top_k_phrases=6,
-            ngram_range=(1, 3),
-            max_features=8000,
-        )
+            logging.getLogger("control").warning(reason)
+            print("[NotebookLM]", reason)
+            _write_notebooklm_status(OUTPUT_DIR, ok=False, reason=reason)
 
     # ---------------- [3/3] BUILD FINAL REPORT PDF ----------------
     if ASSEMBLE_PDF and BUILD_GRAPHS:
@@ -196,7 +191,7 @@ def main():
             dep_wait=artifacts.get("dep_wait", {}),
             months=artifacts.get("months", []),
 
-            # summaries (NotebookLM preferred, TF-IDF fallback)
+            # summaries (NotebookLM only; may be empty if missing)
             pos_theme_df=pos_theme_df,
             neg_theme_df=neg_theme_df,
 
@@ -209,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 

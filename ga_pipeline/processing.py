@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Dict, Tuple, Any, Optional, List
 import logging
 import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -74,6 +75,8 @@ PROCESSED_DICT = {
     26: "neg_exp",
 }
 
+PATIENTS_CLAMP_THRESHOLD = 30
+PATIENTS_CLAMP_VALUE = 15
 
 # ----------------------------
 # Small helpers
@@ -104,6 +107,19 @@ def extract_first_int(val) -> int:
             pass
     m = re.search(r"\d+", str(val))
     return int(m.group(0)) if m else 0
+
+def _normalize_dept_name(val) -> str:
+    """
+    Normalize department names so minor whitespace/encoding differences
+    (e.g., non-breaking spaces) do not create duplicate keys.
+    """
+    if pd.isna(val):
+        return ""
+    s = str(val)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u00a0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def _insert_full_name(df: pd.DataFrame) -> pd.DataFrame:
     if "First Name" in df.columns and "Last Name" in df.columns:
@@ -153,8 +169,9 @@ def _build_department_index(df: pd.DataFrame) -> Dict[str, list]:
         dept_idx["(unknown department)"] = list(range(len(df)))
         return dept_idx
     for i in range(len(df)):
-        dept = df.iloc[i][floor_col]
-        dept_idx.setdefault(dept, []).append(i)
+        dept = _normalize_dept_name(df.iloc[i][floor_col])
+        key = dept if dept else "(unknown department)"
+        dept_idx.setdefault(key, []).append(i)
     return dept_idx
 
 
@@ -184,6 +201,27 @@ def run_processing(
         df["date"] = pd.NaT
 
     df = _fix_num_patients_column(df)
+
+    # Clamp implausibly high per-submission patient counts to a fixed value
+    if "num_patients_clean" in df.columns:
+        clamp_mask = df["num_patients_clean"] > PATIENTS_CLAMP_THRESHOLD
+        clamped = int(clamp_mask.sum())
+        if clamped:
+            log.info(
+                "Clamping %d submission(s) with num_patients_clean > %d to %d",
+                clamped,
+                PATIENTS_CLAMP_THRESHOLD,
+                PATIENTS_CLAMP_VALUE,
+            )
+            df.loc[clamp_mask, "num_patients_clean"] = PATIENTS_CLAMP_VALUE
+
+    floor_col = "floor" if "floor" in df.columns else ("Shift Floor" if "Shift Floor" in df.columns else None)
+    if floor_col is not None:
+        before = df[floor_col].nunique(dropna=False)
+        df[floor_col] = df[floor_col].apply(_normalize_dept_name)
+        after = df[floor_col].nunique(dropna=False)
+        if after != before:
+            log.info(f"Normalized department names: {before} → {after} unique values")
 
     start_ts = _parse_date_or_none(date_start)
     end_ts   = _parse_date_or_none(date_end)
@@ -223,6 +261,7 @@ def run_processing(
             "service": defaultdict(_nested_dict),
             "wait": defaultdict(_nested_dict),
             "patients_per_shift": defaultdict(float),
+            "submissions": defaultdict(int),  # count of survey submissions per dept per month
         }
     )
 
@@ -244,6 +283,7 @@ def run_processing(
             # Tally patients/submissions
             pps_total[month][dept] += float(num_patients)
             pps_count[month][dept] += 1
+            monthly_data[month]["submissions"][dept] += 1
 
             # --- Services (cols 11–19)
             for col in range(11, 20):
