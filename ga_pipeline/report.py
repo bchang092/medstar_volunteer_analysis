@@ -66,6 +66,13 @@ def _styles():
         leading=13.6,
         textColor=colors.HexColor("#111827"),
     )
+    medium = ParagraphStyle(
+        "Medium",
+        parent=styles["BodyText"],
+        fontSize=10.8,
+        leading=14,
+        textColor=colors.HexColor("#0f172a"),
+    )
     small = ParagraphStyle(
         "Small",
         parent=styles["BodyText"],
@@ -73,17 +80,36 @@ def _styles():
         leading=11.5,
         textColor=colors.HexColor("#4b5563"),
     )
-    return title, h2, body, small
+    return title, h2, body, medium, small
 
 
 # -------- page decorations (header/footer) --------
 def _page_decorators():
     """
-    No top header.
-    Keep a small page number at the bottom-right.
+    Minimal header with a small MedStar Health mark on the top-right.
+    Page number stays bottom-right.
     """
+    def _draw_logo(canvas, x, y, scale=0.9):
+        # simple faux-logo: navy bar + gold block + text
+        navy = colors.HexColor("#0b1f36")
+        gold = colors.HexColor("#f3c400")
+        canvas.setFillColor(navy)
+        canvas.rect(x, y, 38 * scale, 12 * scale, fill=1, stroke=0)
+        canvas.setFillColor(gold)
+        canvas.rect(x + 38 * scale, y, 18 * scale, 12 * scale, fill=1, stroke=0)
+        canvas.setFillColor(colors.HexColor("#0b1f36"))
+        canvas.setFont("Helvetica-Bold", 8 * scale)
+        canvas.drawString(x + 0, y - 9 * scale, "MedStar Health")
+
     def header_footer(canvas, doc):
         canvas.saveState()
+        # header logo (skip on cover page)
+        if doc.page > 1:
+            x = doc.pagesize[0] - 1.4 * inch
+            y = doc.pagesize[1] - 0.55 * inch
+            _draw_logo(canvas, x, y, scale=0.9)
+
+        # footer page number
         canvas.setFont("Helvetica", 8.8)
         canvas.setFillColor(colors.HexColor("#6b7280"))
         canvas.drawRightString(doc.pagesize[0] - 0.6 * inch, 0.45 * inch, f"Page {doc.page}")
@@ -178,13 +204,41 @@ def _cover_page_flowables(
     """
     Build a simple, centered cover page with a solid backdrop.
     """
-    title_style, _, body, _ = _styles()
+    title_style, _, body, _, _ = _styles()
 
     # palette
     bg = colors.HexColor("#0b1f36")
     accent = colors.HexColor("#d9a35a")
     text_main = colors.white
     text_sub = colors.HexColor("#e5e7eb")
+
+    def _logo_drawing(scale=1.0):
+        dw, dh = 56 * scale, 22 * scale
+        g = Drawing(dw, dh)
+        navy = colors.HexColor("#0b1f36")
+        gold = colors.HexColor("#f3c400")
+        g.add(Rect(0, 5 * scale, 38 * scale, 12 * scale, fillColor=navy, strokeWidth=0))
+        g.add(Rect(38 * scale, 5 * scale, 18 * scale, 12 * scale, fillColor=gold, strokeWidth=0))
+        g.add(Line(0, 14 * scale, 56 * scale, 18 * scale, strokeColor=colors.white, strokeWidth=1.2 * scale))
+        g.add(Line(0, 11 * scale, 56 * scale, 15 * scale, strokeColor=colors.white, strokeWidth=1.0 * scale))
+        return g
+
+    def _dots_block(scale=1.0):
+        cols, rows = 8, 6
+        spacing = 9 * scale
+        radius = 1.4 * scale
+        dw = cols * spacing
+        dh = rows * spacing
+        d = Drawing(dw, dh)
+        dot_color = colors.HexColor("#e5e7eb")
+        for i in range(cols):
+            for j in range(rows):
+                cx = i * spacing
+                cy = j * spacing
+                d.add(Rect(cx - radius, cy - radius, radius * 2, radius * 2, fillColor=dot_color, strokeColor=dot_color, strokeWidth=0))
+        return d
+
+    # Decorative blocks removed for a cleaner cover
 
     month_str = month_of_analysis or "Not specified"
     quarter_str = f"{date_start or '…'} → {date_end or '…'}"
@@ -195,30 +249,42 @@ def _cover_page_flowables(
         fontSize=30,
         leading=36,
         textColor=text_main,
-        spaceAfter=14,
+        spaceAfter=4,
+        alignment=1,
     ))
+    brand_para = Paragraph(
+        "<b>MedStar Health</b>",
+        title_style.clone("CoverBrand", fontSize=18, leading=22, textColor=text_main, alignment=1),
+    )
     subtitle_para = Paragraph(
         f"Month of analysis: <b>{month_str}</b><br/>Quarter window: <b>{quarter_str}</b>",
-        body.clone("CoverBody", textColor=text_main, fontSize=12.5, leading=16),
+        body.clone("CoverBody", textColor=text_main, fontSize=12.5, leading=16, alignment=1),
     )
     stats_para = Paragraph(
         stats_line or "",
-        body.clone("CoverStats", textColor=text_sub, fontSize=11, leading=14),
+        body.clone("CoverStats", textColor=text_sub, fontSize=11, leading=14, alignment=1),
     ) if stats_line else None
 
-    content = [
-        Spacer(1, frame_h * 0.18),
-        title_para,
-        subtitle_para,
-    ]
+    rows = []
+    heights = []
+
+    rows.append([Spacer(1, 0)])  # top spacer
+    heights.append(frame_h * 0.08)
+    rows.append([title_para]); heights.append(0.70 * inch)
+    rows.append([brand_para]); heights.append(0.35 * inch)
+    rows.append([subtitle_para]); heights.append(0.65 * inch)
     if stats_para:
-        content.extend([Spacer(1, 8), stats_para])
-    content.append(Spacer(1, frame_h * 0.10))
+        rows.append([stats_para]); heights.append(0.45 * inch)
+    rows.append([Spacer(1, 0)]); heights.append(0.30 * inch)
+    # Minimal bottom spacer to center content
+    rows.append([Spacer(1, 0)]); heights.append(0.20 * inch)
 
     inner = Table(
-        [[c] for c in content],
-        colWidths=[frame_w * 0.7],
+        rows,
+        colWidths=[frame_w * 0.85],
+        rowHeights=heights,
         style=TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("LEFTPADDING", (0, 0), (-1, -1), 16),
             ("RIGHTPADDING", (0, 0), (-1, -1), 16),
             ("TOPPADDING", (0, 0), (-1, -1), 0),
@@ -229,31 +295,19 @@ def _cover_page_flowables(
     cover = Table(
         [[inner]],
         colWidths=[frame_w],
-        rowHeights=[frame_h * 0.9],
+        rowHeights=[frame_h * 0.90],
         style=TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), bg),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("LEFTPADDING", (0, 0), (-1, -1), frame_w * 0.08),
             ("RIGHTPADDING", (0, 0), (-1, -1), frame_w * 0.08),
-            ("TOPPADDING", (0, 0), (-1, -1), frame_h * 0.05),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), frame_h * 0.05),
+            ("TOPPADDING", (0, 0), (-1, -1), frame_h * 0.04),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), frame_h * 0.02),
         ]),
     )
 
-    accent_rule = Table(
-        [[Spacer(1, 0.2 * inch)]],
-        colWidths=[frame_w * 0.25],
-        style=TableStyle([
-            ("LINEABOVE", (0, 0), (-1, -1), 2, accent),
-            ("BACKGROUND", (0, 0), (-1, -1), None),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ]),
-    )
-
-    return [cover, Spacer(1, 6), accent_rule, PageBreak()]
+    return [cover, PageBreak()]
 
 
 def _dept_sort_key(dept: str):
@@ -295,7 +349,7 @@ def _dept_page_flowables(
       [  2×2 grid of the four dashboard charts (PNG images)    ]
       [  Bottom row: Positive & Negative themes text boxes      ]
     """
-    _, h2, body, small = _styles()
+    _, h2, body, medium, small = _styles()
 
     window_str = ""
     if date_start or date_end:
@@ -382,7 +436,7 @@ def _dept_page_flowables(
 
         left_table = Table(
             [
-                [Paragraph(f"<b>Monthly ({snapshot_month or 'latest'}) Report</b>", small)],
+                [Paragraph(f"<b>Monthly ({snapshot_month or 'latest'}) Report</b>", medium)],
                 [_cell(imgs_month[0])],
                 [Spacer(1, 0.08 * inch)],
                 [_cell(imgs_month[1])],
@@ -398,7 +452,7 @@ def _dept_page_flowables(
 
         right_table = Table(
             [
-                [Paragraph("<b>Quarterly Report</b>", small)],
+                [Paragraph("<b>Quarterly Report</b>", medium)],
                 [_cell(imgs_qtr[0])],
                 [Spacer(1, 0.08 * inch)],
                 [_cell(imgs_qtr[1])],
@@ -508,7 +562,7 @@ def build_pdf(
     )
 
     frame_w, frame_h = doc.width, doc.height
-    title_style, _, body, _ = _styles()
+    title_style, _, body, _, _ = _styles()
     story: List = []
 
     # ----- Cover page -----
